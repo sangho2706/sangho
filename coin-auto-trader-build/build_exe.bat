@@ -12,7 +12,10 @@ echo.
 REM ---------- 1) 파이썬 찾기 ----------------------------------------------
 set "PY="
 py -3 --version >nul 2>&1 && set "PY=py -3"
-if not defined PY ( python --version >nul 2>&1 && set "PY=python" )
+if not defined PY (
+    rem Microsoft Store 의 가짜 python 은 "Python" 문자열을 못 내놓으므로 걸러진다
+    python --version 2>nul | find "Python" >nul && set "PY=python"
+)
 if not defined PY (
     echo [실패] 파이썬을 찾을 수 없습니다.
     echo        https://www.python.org/downloads/ 에서 설치하고,

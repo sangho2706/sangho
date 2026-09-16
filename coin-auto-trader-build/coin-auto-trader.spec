@@ -56,18 +56,23 @@ for name in sorted(os.listdir(PROJECT_DIR)):
 #    통째로(collect_all) 끌어온다. 설치돼 있는 것만 처리한다.
 # --------------------------------------------------------------------------
 FORCE_COLLECT = [
+    # --- 이 프로젝트가 requirements.txt 에서 실제로 쓰는 것들 ---
+    "pyupbit",       # 업비트 API
+    "dotenv",        # python-dotenv (.env 로딩)
+    "pydantic",
+    "tabulate",
+    "schedule",
+    # --- 그 외 흔히 쓰이는 것들 (설치돼 있을 때만 수집) ---
     "ccxt",          # 해외 거래소 통합 (거래소별 파일을 동적 로드 -> 필수)
-    "pyupbit",       # 업비트
     "python_bithumb",
     "jwt",           # PyJWT (업비트/빗썸 인증)
-    "dotenv",
     "websockets",
     "websocket",     # websocket-client
     "aiohttp",
+    "requests",
     "certifi",
     "charset_normalizer",
     "idna",
-    "schedule",
     "yaml",
     "ta",            # 기술적 지표
     "pandas_ta",
@@ -163,9 +168,10 @@ for dname in ("data", "assets", "templates", "resources", "static", "strategies"
 # 5) 용량 줄이기 - 트레이딩 봇에 보통 필요 없는 무거운 GUI/과학 패키지 제외.
 #    (프로그램이 실제로 쓰면 아래 목록에서 해당 줄을 지우세요)
 # --------------------------------------------------------------------------
+# 주의: 이 프로그램(app.py)은 tkinter GUI 앱이므로 tkinter 를 제외하면 안 된다.
 excludes = [
-    "tkinter", "matplotlib", "IPython", "jupyter", "notebook",
-    "pytest", "sphinx", "PyQt6", "wx",
+    "matplotlib", "IPython", "jupyter", "notebook",
+    "pytest", "sphinx", "PyQt6", "PyQt5", "PySide6", "wx",
 ]
 
 
