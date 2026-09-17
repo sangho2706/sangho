@@ -19,8 +19,40 @@ import traceback
 import datetime
 import faulthandler
 
-# 실행할 원본 진입 모듈 (build_exe.bat 이 빌드 시 자동으로 채워 넣는다)
-ENTRY_MODULE = os.environ.get("CAT_ENTRY", "main")
+# 실행할 원본 진입 모듈.
+#
+# 주의: CAT_ENTRY 환경변수는 '빌드할 때'만 존재한다. exe 를 더블클릭해 실행하는
+# 시점에는 그 변수가 없으므로, 환경변수에만 의존하면 기본값으로 떨어져
+# "ImportError: No module named main" 이 난다. 그래서 빌드 시점에 spec 이
+# _cat_entry.py 를 만들어 진입 모듈 이름을 exe 안에 굳혀 넣는다.
+try:
+    from _cat_entry import ENTRY_MODULE as _BAKED_ENTRY
+except ImportError:
+    _BAKED_ENTRY = None
+
+ENTRY_MODULE = os.environ.get("CAT_ENTRY") or _BAKED_ENTRY or "main"
+
+# 진입 모듈을 못 찾았을 때 대신 시도해 볼 이름들
+FALLBACK_ENTRIES = ("app", "main", "run", "start", "bot", "trader")
+
+
+def resolve_entry(name):
+    """진입 모듈 이름을 확정한다. 지정된 이름이 없으면 후보를 순서대로 찾아본다."""
+    import importlib.util
+
+    def exists(mod):
+        try:
+            return importlib.util.find_spec(mod) is not None
+        except (ImportError, ValueError):
+            return False
+
+    if exists(name):
+        return name
+    for cand in FALLBACK_ENTRIES:
+        if cand != name and exists(cand):
+            print("[안내] '%s' 모듈이 없어 '%s' 로 실행합니다." % (name, cand))
+            return cand
+    return name
 
 
 def app_dir() -> str:
@@ -122,8 +154,9 @@ def main() -> int:
         sys.path.insert(0, base)
 
     # (1) 원본 프로그램을 __main__ 으로 실행
+    entry = resolve_entry(ENTRY_MODULE)
     try:
-        runpy.run_module(ENTRY_MODULE, run_name="__main__", alter_sys=True)
+        runpy.run_module(entry, run_name="__main__", alter_sys=True)
         print()
         print("[종료] 프로그램이 정상적으로 끝났습니다.")
         return 0
@@ -136,6 +169,21 @@ def main() -> int:
         print()
         print("[종료] 사용자가 Ctrl+C 로 중단했습니다.")
         return 130
+    except ImportError as exc:
+        # 진입 모듈 자체가 없을 때만 이 안내를 낸다. 프로그램 내부에서 난
+        # ImportError(예: 패키지 누락)는 아래 일반 오류 처리로 보낸다.
+        if getattr(exc, "name", None) == entry:
+            print()
+            print("!" * 62)
+            print(" 실행할 프로그램 모듈('%s')을 exe 안에서 찾지 못했습니다." % entry)
+            print("!" * 62)
+            print(" 빌드할 때 진입 파일이 잘못 지정된 경우입니다.")
+            print(" build_exe.bat 뒤에 파일명을 붙여 다시 빌드해 주세요.")
+            print("   예)  build_exe.bat app.py")
+            print()
+            traceback.print_exc()
+            return 1
+        raise
     except BaseException:
         print()
         print("!" * 62)

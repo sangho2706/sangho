@@ -10,7 +10,7 @@ PRIORITY = [
     "__main__.py",
 ]
 
-SKIP = {"launcher.py", "setup.py", "conftest.py", "_find_entry.py"}
+SKIP = {"launcher.py", "setup.py", "conftest.py", "_find_entry.py", "_cat_entry.py"}
 
 
 def looks_like_entry(path):

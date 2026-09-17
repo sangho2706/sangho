@@ -26,6 +26,20 @@ def _log(msg):
 
 
 # --------------------------------------------------------------------------
+# 0) 진입 모듈 이름을 exe 안에 굳혀 넣는다.
+#    CAT_ENTRY 환경변수는 빌드 시점에만 존재한다. exe 를 더블클릭해 실행할 때는
+#    그 변수가 없으므로, 런처가 환경변수만 보면 기본값으로 떨어져
+#    "ImportError: No module named main" 이 발생한다.
+# --------------------------------------------------------------------------
+_stub_path = os.path.join(PROJECT_DIR, "_cat_entry.py")
+with open(_stub_path, "w", encoding="utf-8") as _fh:
+    _fh.write("# 빌드할 때 자동 생성되는 파일입니다. 직접 수정하지 마세요.\n")
+    _fh.write("ENTRY_MODULE = %r\n" % ENTRY_MODULE)
+hiddenimports.append("_cat_entry")
+_log("진입 모듈을 exe 에 고정: %s" % ENTRY_MODULE)
+
+
+# --------------------------------------------------------------------------
 # 1) 프로젝트 안의 모든 최상위 .py 를 hiddenimport 로 넣는다.
 #    (조건부 import / importlib 로 불러오는 모듈이 빠지는 사고를 막는다)
 # --------------------------------------------------------------------------
@@ -33,7 +47,7 @@ for fname in sorted(os.listdir(PROJECT_DIR)):
     if not fname.endswith(".py"):
         continue
     mod = fname[:-3]
-    if mod in ("launcher", "_find_entry", "setup", "conftest") or mod.startswith("test_"):
+    if mod in ("launcher", "_find_entry", "_cat_entry", "setup", "conftest") or mod.startswith("test_"):
         continue
     if mod not in hiddenimports:
         hiddenimports.append(mod)
