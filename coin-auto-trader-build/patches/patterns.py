@@ -3,8 +3,11 @@
 
 목표
 ----
-"프로그램을 켰을 때 상승 패턴 표본이 1000개보다 적으면 1000개가 될 때까지
-채워서 학습한다."
+"단기간에 크게 오른(기본 15% 이상) 종목들이 오르기 '직전' 에 어떤 모습이었는지
+그 패턴을 모아서 학습한다. 그리고 지금 그 모습인 종목을 미리 사서, 고점에서
+트레일링 스톱으로 판다."
+
+이미 오른 종목을 쫓아 사는 것이 아니다. 오르기 전의 신호를 찾는 것이다.
 
 - 표본이 부족하면 과거 캔들을 내려받아 소급 수집(backfill)한다.
 - 구동 중에도 매 루프마다 새 표본을 모은다(수집만; 라벨은 미래가 지나야
@@ -47,18 +50,28 @@ log = logging.getLogger("patterns")
 
 # 기본 파라미터
 TARGET_RISING = 1000        # 목표 상승 패턴 개수
-HORIZON = 8                 # 앞으로 몇 개 캔들 안에 오르면 '상승'으로 볼지
-RISE_THRESHOLD_PCT = 1.0    # 몇 % 이상 올라야 '상승'으로 볼지
+HORIZON = 24                # 앞으로 몇 개 캔들 안에 오르면 '급등'으로 볼지 (15분봉 24개 = 6시간)
+RISE_THRESHOLD_PCT = 15.0   # 몇 % 이상 올라야 '급등'으로 볼지
 INTERVAL = "minute15"
+# 특징 목록을 바꾸면 예전 표본과 호환되지 않는다. 그래서 버전을 같이 둔다.
+FEATURE_VERSION = 2
+WARMUP_BARS = 60            # 특징 계산에 필요한 최소 과거 봉 수
+
 FEATURE_NAMES = [
+    # --- 기본 지표 ---
     "rsi14",          # RSI (과매수/과매도)
     "ma_ratio",       # 단기MA / 장기MA - 1  (추세 방향)
     "mom_1",          # 직전 1봉 수익률
     "mom_3",          # 직전 3봉 수익률
     "mom_6",          # 직전 6봉 수익률
     "volatility",     # 최근 변동성
-    "vol_ratio",      # 최근 거래량 / 평균 거래량
+    "vol_ratio",      # 최근 거래량 / 평균 거래량(20봉)
     "range_pos",      # 최근 고저 범위에서 현재가 위치 (0=저점, 1=고점)
+    # --- 급등 직전에 나타나기 쉬운 모습들 ---
+    "vol_surge",      # 거래량이 평소(50봉)보다 몇 배인가 - 자금 유입 신호
+    "squeeze",        # 최근 10봉 변동폭 / 50봉 변동폭 - 1보다 작으면 '눌림(압축)'
+    "dist_from_high", # 50봉 최고가 대비 얼마나 아래인가 - 바닥 근처인지
+    "up_streak",      # 최근 연속 상승 봉 수 (5봉 기준으로 정규화)
 ]
 
 
@@ -98,6 +111,26 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     feat["vol_ratio"] = volume / vol_mean.replace(0, np.nan)
     rng = (roll_max - roll_min).replace(0, np.nan)
     feat["range_pos"] = (close - roll_min) / rng
+
+    # --- 급등 직전 신호 ---
+    # 거래량 급증: 조용하던 종목에 갑자기 돈이 들어오는 모습
+    vol_mean_50 = volume.rolling(50).mean()
+    feat["vol_surge"] = volume / vol_mean_50.replace(0, np.nan)
+
+    # 변동성 압축: 최근 움직임이 평소보다 작아진 상태(눌림). 급등 직전에 흔하다.
+    rng_10 = (close.rolling(10).max() - close.rolling(10).min())
+    rng_50 = (close.rolling(50).max() - close.rolling(50).min())
+    feat["squeeze"] = rng_10 / rng_50.replace(0, np.nan)
+
+    # 50봉 최고가 대비 현재 위치. 0 에 가까우면 고점, 크면 눌려 있는 상태.
+    max_50 = close.rolling(50).max()
+    feat["dist_from_high"] = (max_50 - close) / max_50.replace(0, np.nan) * 100
+
+    # 연속 상승 봉 수 (5봉으로 나눠 크기를 맞춤)
+    up = (close.diff() > 0).astype(float)
+    streak = up.groupby((up != up.shift()).cumsum()).cumsum() * up
+    feat["up_streak"] = streak / 5.0
+
     return feat[FEATURE_NAMES].replace([np.inf, -np.inf], np.nan)
 
 
@@ -107,7 +140,7 @@ def extract_samples(market: str, df: pd.DataFrame, interval: str = INTERVAL,
                     source: str = "backfill") -> list[tuple]:
     """캔들에서 (ts, market, interval, features_json, future_return_pct, label, source)
     튜플 목록을 만든다. db.insert_patterns() 에 그대로 넣을 수 있다."""
-    if df is None or len(df) < 40 + horizon:
+    if df is None or len(df) < WARMUP_BARS + horizon + 5:
         return []
 
     feat = build_feature_frame(df)
@@ -115,7 +148,7 @@ def extract_samples(market: str, df: pd.DataFrame, interval: str = INTERVAL,
     n = len(df)
     rows: list[tuple] = []
 
-    for i in range(30, n - horizon):
+    for i in range(WARMUP_BARS, n - horizon):
         values = feat.iloc[i]
         if values.isna().any():
             continue
@@ -133,9 +166,43 @@ def extract_samples(market: str, df: pd.DataFrame, interval: str = INTERVAL,
     return rows
 
 
+def rule_signature(rise_threshold_pct: float, horizon: int, interval: str) -> str:
+    """지금의 학습 규칙을 한 줄로 나타낸다."""
+    return (f"v{FEATURE_VERSION}|{interval}|{horizon}bars|"
+            f"{rise_threshold_pct:g}pct|{len(FEATURE_NAMES)}feat")
+
+
+def ensure_rule(database, rise_threshold_pct: float, horizon: int,
+                interval: str, progress=None) -> bool:
+    """학습 규칙이 예전과 다르면 표본을 비운다.
+
+    급등 기준(몇 %)이나 관찰 기간, 특징 목록이 바뀌면 예전 표본은 라벨과
+    특징이 모두 달라져 그대로 섞어 쓰면 학습이 망가진다. 지우고 다시 모으는
+    것이 맞다. 반환값은 '비웠는가'.
+    """
+    sig = rule_signature(rise_threshold_pct, horizon, interval)
+    old = database.get_meta("pattern_rule")
+    if old == sig:
+        return False
+    removed = database.clear_patterns()
+    database.set_meta("pattern_rule", sig)
+    if old is not None and removed:
+        msg = (f"학습 기준이 바뀌어(이전: {old} → 현재: {sig}) "
+               f"기존 표본 {removed:,}개를 비우고 다시 모읍니다.")
+        log.info(msg)
+        if progress:
+            try:
+                progress(msg)
+            except Exception:
+                pass
+    return True
+
+
 def collect_until_target(exchange, database, target_rising: int = TARGET_RISING,
-                         interval: str = INTERVAL, candles_per_call: int = 200,
-                         max_markets: int = 60,
+                         interval: str = INTERVAL, candles_per_call: int = 1200,
+                         max_markets: int = 120,
+                         rise_threshold_pct: float = RISE_THRESHOLD_PCT,
+                         horizon: int = HORIZON,
                          progress=None) -> dict:
     """상승 패턴이 target_rising 개가 될 때까지 과거 캔들에서 표본을 모은다.
 
@@ -150,14 +217,18 @@ def collect_until_target(exchange, database, target_rising: int = TARGET_RISING,
             except Exception:
                 pass
 
+    # 급등 기준이 바뀌었으면 예전 표본은 쓸 수 없으므로 먼저 정리한다.
+    ensure_rule(database, rise_threshold_pct, horizon, interval, progress=progress)
+
     have = database.count_patterns(label=1)
     if have >= target_rising:
         _say("상승 패턴 %d개 확보됨 (목표 %d) - 추가 수집이 필요 없습니다."
              % (have, target_rising))
         return {"collected": 0, "rising": have, "scanned_markets": 0, "skipped": True}
 
-    _say("상승 패턴이 %d개뿐입니다. 목표 %d개까지 과거 데이터로 채웁니다."
-         % (have, target_rising))
+    _say("급등(%.0f%% 이상 / %d봉 이내) 패턴이 %d개뿐입니다. 목표 %d개까지 "
+         "과거 데이터에서 찾습니다. 기준이 높을수록 드물어서 시간이 걸립니다."
+         % (rise_threshold_pct, horizon, have, target_rising))
 
     try:
         markets = exchange.get_krw_tickers()
@@ -177,10 +248,12 @@ def collect_until_target(exchange, database, target_rising: int = TARGET_RISING,
         except Exception:
             log.warning("%s 캔들 조회 실패 - 건너뜁니다.", market)
             continue
-        if df is None or len(df) < 40:
+        if df is None or len(df) < WARMUP_BARS + horizon + 5:
             continue
 
-        rows = extract_samples(market, df, interval=interval)
+        rows = extract_samples(market, df, interval=interval,
+                               horizon=horizon,
+                               rise_threshold_pct=rise_threshold_pct)
         added = database.insert_patterns(rows)
         total_new += added
         scanned += 1
@@ -189,8 +262,14 @@ def collect_until_target(exchange, database, target_rising: int = TARGET_RISING,
                  % (market, added, database.count_patterns(label=1)))
 
     rising = database.count_patterns(label=1)
-    _say("패턴 수집 완료: 표본 %d개 추가, 상승 패턴 %d개 / 전체 %d개 (마켓 %d개 조회)"
-         % (total_new, rising, database.count_patterns(), scanned))
+    total_all = database.count_patterns()
+    ratio = (rising / total_all * 100) if total_all else 0.0
+    _say("패턴 수집 완료: 표본 %d개 추가, 급등 패턴 %d개 / 전체 %d개 (%.1f%%), 마켓 %d개 조회"
+         % (total_new, rising, total_all, ratio, scanned))
+    if rising < target_rising:
+        _say("목표(%d개)에 못 미쳤습니다. %.0f%% 급등은 드물어서 그렇습니다. "
+             "기준을 낮추거나(예: 10%%) 관찰 기간을 늘리면 표본이 늘어납니다."
+             % (target_rising, rise_threshold_pct))
     return {"collected": total_new, "rising": rising, "scanned_markets": scanned,
             "skipped": False}
 
@@ -295,13 +374,25 @@ def train(database, epochs: int = 400, lr: float = 0.1,
         return None
 
     X, y = [], []
+    skipped = 0
     for r in rows:
         try:
             f = json.loads(r["features_json"])
         except (json.JSONDecodeError, TypeError):
             continue
-        X.append([float(f.get(k, 0.0)) for k in FEATURE_NAMES])
+        # 특징 목록이 바뀐 뒤 남아 있는 옛 표본은 건너뛴다. 없는 값을 0 으로
+        # 채워 넣으면 학습이 엉뚱한 방향으로 간다.
+        if not all(k in f for k in FEATURE_NAMES):
+            skipped += 1
+            continue
+        X.append([float(f[k]) for k in FEATURE_NAMES])
         y.append(int(r["label"]))
+
+    if skipped:
+        log.info("특징 형식이 다른 옛 표본 %d개는 학습에서 제외했습니다.", skipped)
+    if len(y) < 200:
+        log.info("쓸 수 있는 표본이 %d개뿐이라 학습을 건너뜁니다.", len(y))
+        return None
 
     X = np.array(X, dtype=float)
     y = np.array(y, dtype=float)
@@ -344,13 +435,37 @@ def train(database, epochs: int = 400, lr: float = 0.1,
 
     # --- 검증 ---
     p_va = _proba(Z_va)
+    base_rate = float(y_va.mean())                      # 아무거나 샀을 때 오를 확률
+
+    # 기준 확률을 자동으로 고른다.
+    #
+    # 기준을 낮게 잡으면 신호가 쏟아져 거의 항상 매수하게 되고, 그러면 아무
+    # 종목이나 사는 것과 다를 바 없어진다. 반대로 너무 높이면 신호가 없다.
+    # 그래서 '신호가 충분히 나오는 선에서 적중률이 가장 높은 기준' 을 찾는다.
+    MIN_SIGNALS = 50      # 이보다 적으면 판단 근거로 삼지 않는다
+    candidates = [threshold] + [x / 100 for x in range(50, 96, 5)]
+    best = None
+    for th in sorted(set(candidates)):
+        sig = p_va >= th
+        n = int(sig.sum())
+        if n < MIN_SIGNALS:
+            continue
+        prec = float(y_va[sig].mean())
+        if best is None or (prec - base_rate) > best[1]:
+            best = (th, prec - base_rate, n, prec)
+    if best is not None:
+        threshold = best[0]
+    else:
+        # 어떤 기준에서도 신호가 부족하면 요청받은 기준을 그대로 쓴다.
+        log.info("신호가 충분히 나오는 기준을 찾지 못해 요청값 %.2f 를 씁니다.", threshold)
+
     signal = p_va >= threshold
     n_signals = int(signal.sum())
-    base_rate = float(y_va.mean())                      # 아무거나 샀을 때 오를 확률
     precision = float(y_va[signal].mean()) if n_signals else 0.0
     recall = float(signal[y_va == 1].mean()) if y_va.sum() else 0.0
     val_acc = float((signal.astype(float) == y_va).mean())
     edge = precision - base_rate
+    signal_rate = (n_signals / len(y_va) * 100) if len(y_va) else 0.0
 
     # 우연히 좋아 보이는 것을 걸러낸다.
     #
@@ -367,7 +482,6 @@ def train(database, epochs: int = 400, lr: float = 0.1,
     else:
         std_err, z_score = 0.0, 0.0
 
-    MIN_SIGNALS = 50      # 이보다 적으면 판단 근거로 삼지 않는다
     MIN_EDGE = 0.03       # 수수료를 생각하면 최소 3%p 는 나아야 의미가 있다
     MIN_Z = 2.0           # 우연일 확률 약 5% 미만
     useful = bool(n_signals >= MIN_SIGNALS and edge >= MIN_EDGE and z_score >= MIN_Z)
@@ -386,10 +500,11 @@ def train(database, epochs: int = 400, lr: float = 0.1,
 
     log.info("패턴 학습 완료 - 표본 %d개(상승 %d개)", model.n_samples, model.n_rising)
     if n_signals:
-        log.info("  검증(안 본 %d개): 매수 신호 %d회, 그중 실제 상승 %.1f%% "
+        log.info("  검증(안 본 %d개): 기준 확률 %.0f%% 채택 → 매수 신호 %d회"
+                 "(전체의 %.0f%%), 그중 실제 급등 %.1f%% "
                  "(아무거나 샀을 때 %.1f%%) → 이득 %+.1f%%p",
-                 model.val_samples, n_signals, precision * 100,
-                 base_rate * 100, edge * 100)
+                 model.val_samples, threshold * 100, n_signals, signal_rate,
+                 precision * 100, base_rate * 100, edge * 100)
     else:
         log.info("  검증(안 본 %d개): 기준 확률 %.0f%% 를 넘는 매수 신호가 한 번도 없었습니다.",
                  model.val_samples, threshold * 100)
@@ -413,10 +528,13 @@ def train(database, epochs: int = 400, lr: float = 0.1,
 def ensure_trained(exchange, database, model_path: Path,
                    target_rising: int = TARGET_RISING,
                    threshold: float = 0.55,
+                   rise_threshold_pct: float = RISE_THRESHOLD_PCT,
+                   horizon: int = HORIZON,
                    progress=None) -> tuple[Optional[PatternModel], dict]:
     """표본을 목표치까지 채우고 학습한 모델을 돌려준다. 프로그램 시작 시 호출."""
     stats = collect_until_target(exchange, database, target_rising=target_rising,
-                                 progress=progress)
+                                 rise_threshold_pct=rise_threshold_pct,
+                                 horizon=horizon, progress=progress)
     model = train(database, threshold=threshold)
     if model is not None:
         model.save(model_path)

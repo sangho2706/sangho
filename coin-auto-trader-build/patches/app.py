@@ -72,6 +72,7 @@ class SettingsDialog(tk.Toplevel):
 
         current = env_store.read_env()
         self.vars: dict[str, tk.Variable] = {}
+        self._choice_maps: dict[str, dict[str, str]] = {}
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True, padx=14, pady=10)
@@ -103,6 +104,23 @@ class SettingsDialog(tk.Toplevel):
                 def toggle():
                     entry.config(show="" if entry.cget("show") == "*" else "*")
                 ttk.Button(row, text="표시", width=5, command=toggle).pack(side="left", padx=4)
+            self.vars[key] = var
+            return var
+
+        def choice_field(key: str, label: str, default: str,
+                         options: list[tuple[str, str]]):
+            """보기 중에서 고르는 항목. options 는 (저장값, 화면표시) 목록."""
+            row = ttk.Frame(scroll_frame)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=label, width=32).pack(side="left")
+            cur = current.get(key, default)
+            labels = [t for _, t in options]
+            var = tk.StringVar(value=dict(options).get(cur, labels[0]))
+            box = ttk.Combobox(row, textvariable=var, values=labels,
+                               state="readonly", width=34)
+            box.pack(side="left", fill="x", expand=True)
+            # 화면 표시를 저장값으로 되돌리기 위한 역방향 표
+            self._choice_maps[key] = {t: v for v, t in options}
             self.vars[key] = var
             return var
 
@@ -179,7 +197,32 @@ class SettingsDialog(tk.Toplevel):
                  "  ※ 손절선을 0 으로 두면 손절을 아예 안 합니다. 매우 위험합니다.",
         ).pack(anchor="w", pady=(2, 6))
 
-        section("6. 매매 판단 및 리포트 주기")
+        section("6. 급등 패턴 학습 (오르기 전에 미리 사기)")
+        ttk.Label(
+            scroll_frame, foreground="#555", wraplength=560, justify="left",
+            text="과거에 크게 올랐던 종목들이 '오르기 직전' 에 어떤 모습이었는지\n"
+                 "학습해서, 지금 그 모습인 종목을 미리 삽니다.\n"
+                 "이미 오른 종목을 따라 사는 것과는 다릅니다.",
+        ).pack(anchor="w", pady=(0, 4))
+        text_field("PATTERN_RISE_THRESHOLD_PCT", "몇 % 오르면 '급등'으로 볼지", "15", width=10)
+        text_field("PATTERN_HORIZON_BARS", "몇 봉 안에 오르면 급등인지 (24=6시간)", "24", width=10)
+        text_field("PATTERN_TARGET_RISING", "모을 급등 사례 개수", "1000", width=10)
+        choice_field(
+            "PATTERN_ENTRY_MODE", "학습 결과를 매매에 쓰는 방식", "signal",
+            [("signal", "급등 전조를 찾으면 직접 매수 (권장)"),
+             ("filter", "기존 전략의 매수를 검토만 함"),
+             ("off", "사용 안 함")],
+        )
+        ttk.Label(
+            scroll_frame, foreground="#555", wraplength=560, justify="left",
+            text="· 기준을 높일수록(예: 20%) 사례가 드물어 모으는 데 오래 걸립니다.\n"
+                 "· 매수 확률 기준은 프로그램이 '적중률이 가장 높아지는 값'으로\n"
+                 "  알아서 정합니다. 직접 정할 필요 없습니다.\n"
+                 "· 검증에서 성적이 기준에 못 미치면 매수하지 않고 기다립니다.\n"
+                 "  (리포트 > 패턴 학습 탭에서 상태를 볼 수 있습니다)",
+        ).pack(anchor="w", pady=(2, 6))
+
+        section("7. 매매 판단 및 리포트 주기")
         text_field("TRADE_LOOP_INTERVAL_MIN", "매매 판단 주기 (분)", "5", width=10)
         text_field("REPORT_INTERVAL_HOURS", "리포트 생성 주기 (시간, 24=하루 한 번)", "24", width=10)
         text_field("REPORT_HOUR_KST", "매일 리포트 생성 시각 (0-23)", "9", width=10)
@@ -196,7 +239,9 @@ class SettingsDialog(tk.Toplevel):
                 if isinstance(var, tk.BooleanVar):
                     values[key] = "true" if var.get() else "false"
                 else:
-                    values[key] = str(var.get()).strip()
+                    raw = str(var.get()).strip()
+                    # 선택형은 화면에 보이는 글자를 저장값으로 되돌린다
+                    values[key] = self._choice_maps.get(key, {}).get(raw, raw)
 
             budget = float(values["AUTO_TRADING_BUDGET_KRW"])
             if budget <= 0:
@@ -228,6 +273,15 @@ class SettingsDialog(tk.Toplevel):
                 raise ValueError("리포트 생성 시각은 0~23 사이여야 합니다.")
             if not _is_true(values["AUTO_SELECT_MARKETS"]) and not values["TARGET_MARKETS"].strip():
                 raise ValueError("종목 자동 추천을 끄셨다면 직접 지정 종목을 최소 1개 입력하세요.")
+
+            rise_th = float(values["PATTERN_RISE_THRESHOLD_PCT"])
+            if not (0 < rise_th <= 100):
+                raise ValueError("급등 기준은 0보다 크고 100 이하여야 합니다 (15 = 15%).")
+            horizon = int(values["PATTERN_HORIZON_BARS"])
+            if horizon <= 0:
+                raise ValueError("관찰 기간은 1봉 이상이어야 합니다.")
+            if int(values["PATTERN_TARGET_RISING"]) <= 0:
+                raise ValueError("모을 급등 사례 개수는 1 이상이어야 합니다.")
 
             stop_loss = float(values["STOP_LOSS_PCT"])
             if not (0 <= stop_loss < 1):
