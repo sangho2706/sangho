@@ -101,20 +101,77 @@ class ExchangeClient:
 
     # ---------- 실제 계좌 잔고 (live_trading=True 일 때만 의미 있음) ----------
 
+    # 업비트가 돌려주는 오류 코드를 사람이 읽을 수 있는 안내로 바꾼다.
+    _ERROR_HINTS = [
+        ("no_authorization_i_p",
+         "허용 IP에 등록되지 않은 곳에서 접속했습니다. 업비트 > Open API 관리 에서 "
+         "지금 쓰는 PC의 공인 IP를 등록하세요 (네이버에 '내 아이피' 검색)."),
+        ("invalid_access_key",
+         "Access Key 가 올바르지 않습니다. 공백이 섞이지 않았는지 확인하세요."),
+        ("expired_access_key",
+         "API 키가 만료되었습니다. 업비트에서 새로 발급받으세요."),
+        ("jwt_verification",
+         "Secret Key 가 올바르지 않습니다. 발급 시 한 번만 보이는 값이라 "
+         "잘못 복사했을 수 있습니다."),
+        ("out_of_scope",
+         "이 키에 '자산조회' 권한이 없습니다. 업비트 > Open API 관리 에서 권한을 "
+         "확인하세요."),
+        ("invalid_query_payload",
+         "요청 형식 오류입니다. API 키를 다시 발급받아 입력해 보세요."),
+    ]
+
+    @classmethod
+    def _explain_error(cls, text: str) -> str:
+        low = (text or "").lower()
+        for code, hint in cls._ERROR_HINTS:
+            if code in low:
+                return hint
+        if "401" in low or "unauthorized" in low:
+            return ("인증이 거부되었습니다. 키가 정확한지, 허용 IP가 등록되어 있는지 "
+                    "확인하세요.")
+        if "timed out" in low or "connection" in low:
+            return "업비트 서버에 연결하지 못했습니다. 인터넷 연결을 확인하세요."
+        return text or "알 수 없는 오류"
+
     def get_account_balances(self) -> list[dict]:
-        """업비트 계정 전체 잔고를 그대로 반환한다.
+        """업비트 계정 전체 잔고를 그대로 반환한다 (실패 시 빈 목록).
 
         주의: 이 값에는 '기존에 수동으로 보유하던 자산'도 전부 포함되어 있다.
         자동매매는 이 함수의 결과를 매매 판단에 절대 사용하지 않고, ledger.py 가
         관리하는 내부 장부만 사용한다 (그것이 수동/자동 분리의 핵심).
         """
+        balances, _ = self.fetch_balances()
+        return balances
+
+    def fetch_balances(self) -> tuple[list[dict], str]:
+        """잔고와 실패 사유를 함께 돌려준다.
+
+        예전에는 실패를 조용히 삼켜서 화면에 계속 "API 키를 넣으세요" 만 뜨고
+        진짜 원인(허용 IP 미등록, 권한 없음 등)을 알 길이 없었다. 그래서
+        사유를 문자열로 함께 반환한다.
+        """
+        if pyupbit is None:
+            return [], "pyupbit 패키지가 설치되어 있지 않습니다."
         if self._upbit is None:
-            return []
+            return [], "API 키가 입력되지 않았습니다."
+
         try:
-            balances = self._upbit.get_balances()
-        except Exception:
-            return []
-        return balances or []
+            raw = self._upbit.get_balances()
+        except Exception as exc:
+            return [], self._explain_error(f"{type(exc).__name__}: {exc}")
+
+        # pyupbit 버전에 따라 오류를 예외가 아니라 값으로 돌려주기도 한다.
+        if raw is None:
+            return [], self._explain_error("업비트가 응답을 주지 않았습니다 (키/IP 확인 필요)")
+        if isinstance(raw, dict):
+            err = raw.get("error") or raw
+            name = str(err.get("name", "")) if isinstance(err, dict) else ""
+            msg = str(err.get("message", "")) if isinstance(err, dict) else str(err)
+            return [], self._explain_error(f"{name} {msg}".strip())
+        if not isinstance(raw, list):
+            return [], self._explain_error(f"예상과 다른 응답 형식: {type(raw).__name__}")
+
+        return [b for b in raw if isinstance(b, dict)], ""
 
     def get_account_summary(self) -> dict:
         """업비트 계정 전체를 원화로 환산한 요약.
@@ -122,12 +179,15 @@ class ExchangeClient:
         수동으로 들고 있는 코인까지 전부 포함한 '내 전체 자산' 이다.
         자동매매 장부(ledger)와는 무관하며, 조회만 한다.
 
-        반환: {"available": bool, "krw": 원화잔고, "coin_value": 코인평가액,
-               "total": 합계, "items": [종목별 내역]}
+        반환: {"available": bool, "reason": 실패사유, "krw": 원화잔고,
+               "coin_value": 코인평가액, "total": 합계, "items": [종목별 내역]}
         """
-        balances = self.get_account_balances()
+        balances, error = self.fetch_balances()
+        if error:
+            return {"available": False, "reason": error, "krw": 0.0,
+                    "coin_value": 0.0, "total": 0.0, "items": []}
         if not balances:
-            return {"available": False, "krw": 0.0, "coin_value": 0.0,
+            return {"available": True, "reason": "", "krw": 0.0, "coin_value": 0.0,
                     "total": 0.0, "items": []}
 
         krw = 0.0
@@ -160,7 +220,7 @@ class ExchangeClient:
             items.append({"currency": currency, "amount": amount, "value_krw": value})
 
         items.sort(key=lambda x: x["value_krw"], reverse=True)
-        return {"available": True, "krw": krw, "coin_value": coin_value,
+        return {"available": True, "reason": "", "krw": krw, "coin_value": coin_value,
                 "total": krw + coin_value, "items": items}
 
     # ---------- 주문 ----------
