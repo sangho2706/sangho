@@ -75,6 +75,7 @@ FORCE_COLLECT = [
     "dotenv",        # python-dotenv (.env 로딩)
     "pydantic",
     "tabulate",
+    "openpyxl",      # 투자 이력 엑셀 내보내기
     "schedule",
     # --- 그 외 흔히 쓰이는 것들 (설치돼 있을 때만 수집) ---
     "ccxt",          # 해외 거래소 통합 (거래소별 파일을 동적 로드 -> 필수)
