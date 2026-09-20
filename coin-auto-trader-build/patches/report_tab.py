@@ -132,11 +132,13 @@ class _Table(ttk.Frame):
 
 
 class ReportTab(ttk.Frame):
-    def __init__(self, parent, get_db, get_trader, reports_dir: Path):
+    def __init__(self, parent, get_db, get_trader, reports_dir: Path,
+                 model_path: Path | None = None):
         super().__init__(parent, padding=10)
         self.get_db = get_db
         self.get_trader = get_trader
         self.reports_dir = Path(reports_dir)
+        self.model_path = Path(model_path) if model_path else None
         self._build()
         self.after(800, self._auto_refresh)
 
@@ -223,13 +225,15 @@ class ReportTab(ttk.Frame):
         pat_tab = ttk.Frame(nb, padding=12)
         nb.add(pat_tab, text="패턴 학습")
         self.pattern_vars = {k: tk.StringVar(value="-") for k in
-                             ("progress", "total", "accuracy", "trained", "filter")}
+                             ("progress", "total", "precision", "edge",
+                              "trained", "filter")}
         prows = [
             ("상승 패턴 수집", "progress"),
             ("전체 표본", "total"),
-            ("학습 정확도", "accuracy"),
+            ("검증 적중률", "precision"),
+            ("기준선 대비", "edge"),
             ("마지막 학습", "trained"),
-            ("매매 반영 여부", "filter"),
+            ("매매 반영 상태", "filter"),
         ]
         for i, (label, key) in enumerate(prows):
             ttk.Label(pat_tab, text=label, width=16).grid(row=i, column=0, sticky="w", pady=5)
@@ -239,11 +243,13 @@ class ReportTab(ttk.Frame):
         self.pattern_bar.grid(row=len(prows), column=0, columnspan=2,
                               sticky="w", pady=(12, 6))
         ttk.Label(
-            pat_tab, foreground="#666", wraplength=620, justify="left",
-            text="프로그램을 실행하면 상승 패턴 표본이 목표치(기본 1000개)에 못 미칠 때\n"
-                 "과거 캔들에서 자동으로 채운 뒤 학습합니다. 구동 중에도 계속 모읍니다.\n\n"
-                 "학습 결과는 기본적으로 '참고용'입니다. 실제 매수 판단에 반영하려면\n"
-                 ".env 에서 USE_PATTERN_FILTER=true 로 직접 켜야 합니다.",
+            pat_tab, foreground="#666", wraplength=660, justify="left",
+            text="'검증 적중률' 은 학습에 쓰지 않은 최근 구간으로 채점한 값입니다.\n"
+                 "모델이 \"오른다\" 고 한 것 중 실제로 오른 비율이며, 이 값이 '기준선'\n"
+                 "(아무거나 샀을 때 오를 확률)보다 높아야 쓸모가 있습니다.\n\n"
+                 "학습 결과는 매수 판단에 반영됩니다. 다만 기준선을 넘지 못한 동안에는\n"
+                 "적용을 보류합니다 - 근거 없는 모델로 매수 기회를 날리지 않기 위해서입니다.\n"
+                 "표본이 쌓여 성능이 올라오면 자동으로 적용이 시작됩니다.",
         ).grid(row=len(prows) + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     # ---------- 갱신 ----------
@@ -295,28 +301,60 @@ class ReportTab(ttk.Frame):
         # --- 패턴 학습 ---
         rising = db.count_patterns(label=1)
         total_pat = db.count_patterns()
-        target = 1000
-        filter_on = False
-        accuracy = trained = ""
-        if trader is not None:
-            ps = trader.pattern_summary()
-            target = ps.get("target", 1000) or 1000
-            filter_on = ps.get("filter_on", False)
-            accuracy = f"{ps.get('accuracy', 0) * 100:.1f}%" if ps.get("n_samples") else ""
-            trained = ps.get("trained_at", "")
+        ps = trader.pattern_summary() if trader is not None else self._saved_model_summary()
+        target = ps.get("target", 1000) or 1000
         pct = min(rising / target * 100, 100) if target else 0
+
         self.vars["pattern"].set(f"{rising:,} / {target:,}개")
         self.pattern_vars["progress"].set(
             f"{rising:,} / {target:,}개  ({pct:.0f}%)"
             + ("  목표 달성" if rising >= target else "  수집 중"))
         self.pattern_vars["total"].set(f"{total_pat:,}개")
-        self.pattern_vars["accuracy"].set(accuracy or "(아직 학습 전)")
+        self.pattern_bar["value"] = pct
+
+        trained = ps.get("trained_at", "")
         self.pattern_vars["trained"].set(
             trained.replace("T", " ")[:19] if trained else "(아직 학습 전)")
-        self.pattern_vars["filter"].set(
-            "반영함 (USE_PATTERN_FILTER=true)" if filter_on
-            else "참고용 - 매매에 반영 안 함")
-        self.pattern_bar["value"] = pct
+
+        if ps.get("val_samples"):
+            prec = ps.get("val_precision", 0.0) * 100
+            base = ps.get("val_base_rate", 0.0) * 100
+            edge = ps.get("edge", 0.0) * 100
+            if ps.get("val_signals"):
+                self.pattern_vars["precision"].set(
+                    f"{prec:.1f}%   (매수 신호 {ps['val_signals']:,}회 / "
+                    f"검증 표본 {ps['val_samples']:,}개)")
+            else:
+                self.pattern_vars["precision"].set(
+                    f"(기준 {ps.get('threshold', 0.55) * 100:.0f}% 를 넘는 신호가 없었음)")
+            z = ps.get("z_score", 0.0)
+            if not ps.get("val_signals"):
+                # 신호가 한 번도 없으면 적중률 자체가 없다. 이때 이득을 숫자로
+                # 보여주면 '크게 손해' 처럼 읽혀서 오해를 준다.
+                self.pattern_vars["edge"].set(
+                    f"판정 불가 - 매수 신호 없음 (기준선 {base:.1f}%)")
+            else:
+                self.pattern_vars["edge"].set(
+                    f"기준선 {base:.1f}% → {edge:+.1f}%p "
+                    + ("이득" if edge > 0 else "손해")
+                    + f"   (우연 아닐 확신도 z={z:.1f})")
+        else:
+            self.pattern_vars["precision"].set("(아직 학습 전)")
+            self.pattern_vars["edge"].set("(아직 학습 전)")
+
+        if not ps:
+            self.pattern_vars["filter"].set("(봇을 실행하면 표시됩니다)")
+        elif ps.get("stopped"):
+            self.pattern_vars["filter"].set(
+                ("검증 통과 - 실행하면 매수 판단에 반영됩니다" if ps.get("is_useful")
+                 else "아직 기준선 미달 - 실행해도 적용은 보류됩니다") + "  (봇 정지 중)")
+        elif not ps.get("filter_on"):
+            self.pattern_vars["filter"].set("꺼짐 - USE_PATTERN_FILTER=false")
+        elif ps.get("applying"):
+            self.pattern_vars["filter"].set("반영 중 - 검증 통과")
+        else:
+            self.pattern_vars["filter"].set(
+                "대기 중 - 아직 기준선을 못 넘어 적용 보류")
 
         # --- 그래프 ---
         equity = hx.equity_series(db)
@@ -333,6 +371,27 @@ class ReportTab(ttk.Frame):
                                     comma_cols=(5, 6, 7, 8))
 
         self.vars["updated"].set("갱신 " + datetime.now().strftime("%H:%M:%S"))
+
+    def _saved_model_summary(self) -> dict:
+        """봇이 꺼져 있을 때는 마지막으로 저장된 학습 모델을 읽어 보여준다."""
+        if self.model_path is None or not self.model_path.exists():
+            return {}
+        try:
+            import patterns
+            m = patterns.PatternModel.load(self.model_path)
+        except Exception:
+            return {}
+        if m is None:
+            return {}
+        return {
+            "target": 1000, "trained_at": m.trained_at, "accuracy": m.accuracy,
+            "n_samples": m.n_samples, "threshold": m.threshold,
+            "val_samples": m.val_samples, "val_signals": m.val_signals,
+            "val_precision": m.val_precision, "val_base_rate": m.val_base_rate,
+            "edge": m.edge, "z_score": m.z_score, "is_useful": m.is_useful,
+            "filter_on": None,   # 봇이 꺼져 있어 현재 설정을 알 수 없음
+            "applying": False, "stopped": True,
+        }
 
     # ---------- 내보내기 ----------
 

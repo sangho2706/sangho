@@ -209,7 +209,19 @@ class PatternModel:
     trained_at: str = ""
     n_samples: int = 0
     n_rising: int = 0
-    accuracy: float = 0.0
+    accuracy: float = 0.0          # 학습 데이터 기준 (참고용, 낙관적으로 나옴)
+
+    # --- 검증(안 본 데이터) 기준 지표. 실제 판단은 전부 이 값으로 한다. ---
+    threshold: float = 0.55        # 이 확률 이상일 때 '오른다'고 본 것
+    val_samples: int = 0           # 검증에 쓴 표본 수
+    val_signals: int = 0           # 그중 모델이 '오른다'고 한 횟수
+    val_precision: float = 0.0     # 그 예측이 실제로 맞은 비율  ← 매매에서 가장 중요
+    val_recall: float = 0.0        # 실제 상승 중 잡아낸 비율
+    val_accuracy: float = 0.0
+    val_base_rate: float = 0.0     # 아무거나 샀을 때의 상승 비율 (비교 기준선)
+    edge: float = 0.0              # val_precision - val_base_rate (0 이하면 쓸모 없음)
+    z_score: float = 0.0           # 이득이 우연인지 판별하는 값 (2 이상이면 우연일 확률 5% 미만)
+    is_useful: bool = False        # 기준선을 '우연이 아니게' 넘었는지
 
     def to_dict(self) -> dict:
         return {
@@ -217,11 +229,18 @@ class PatternModel:
             "std": self.std, "feature_names": self.feature_names,
             "trained_at": self.trained_at, "n_samples": self.n_samples,
             "n_rising": self.n_rising, "accuracy": self.accuracy,
+            "threshold": self.threshold, "val_samples": self.val_samples,
+            "val_signals": self.val_signals, "val_precision": self.val_precision,
+            "val_recall": self.val_recall, "val_accuracy": self.val_accuracy,
+            "val_base_rate": self.val_base_rate, "edge": self.edge,
+            "z_score": self.z_score, "is_useful": self.is_useful,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "PatternModel":
-        return cls(**d)
+        # 예전 버전이 저장한 파일에는 검증 지표가 없으므로 아는 항목만 취한다
+        known = {f for f in cls.__dataclass_fields__}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
     def predict_proba(self, features: dict) -> float:
         """이 패턴이 오를 확률 (0~1)."""
@@ -248,13 +267,31 @@ class PatternModel:
             return None
 
 
-def train(database, epochs: int = 400, lr: float = 0.1) -> Optional[PatternModel]:
-    """저장된 표본으로 로지스틱 회귀를 학습한다. 표본이 너무 적으면 None."""
+def train(database, epochs: int = 400, lr: float = 0.1,
+          threshold: float = 0.55, val_ratio: float = 0.25) -> Optional[PatternModel]:
+    """저장된 표본으로 로지스틱 회귀를 학습하고, '안 본 데이터'로 검증한다.
+
+    검증을 시간 순으로 나누는 이유
+    -----------------------------
+    시세 데이터는 무작위로 섞어 나누면 안 된다. 뒤 시점의 정보가 앞 시점
+    학습에 섞여 들어가 실제보다 훨씬 좋은 점수가 나오기 때문이다.
+    그래서 앞쪽 75%로 배우고, 뒤쪽 25%(한 번도 안 본 구간)로 채점한다.
+
+    무엇을 보고 쓸모를 판단하나
+    --------------------------
+    단순 정확도는 속기 쉽다. 상승이 전체의 37%뿐이면 "무조건 안 오른다"고만
+    찍어도 정확도가 63%로 나온다. 매매에서 실제로 중요한 값은
+
+        정밀도(precision) = 모델이 "오른다"고 한 것 중 진짜 오른 비율
+
+    이고, 이 값이 '아무거나 샀을 때의 상승 비율(기준선)'보다 의미 있게
+    높아야만 쓸모가 있다. 그 차이를 edge 로 기록한다.
+    """
     from datetime import datetime
 
     rows = database.all_patterns()
-    if len(rows) < 50:
-        log.info("표본이 %d개뿐이라 학습을 건너뜁니다 (최소 50개 필요).", len(rows))
+    if len(rows) < 200:
+        log.info("표본이 %d개뿐이라 학습을 건너뜁니다 (최소 200개 필요).", len(rows))
         return None
 
     X, y = [], []
@@ -272,47 +309,115 @@ def train(database, epochs: int = 400, lr: float = 0.1) -> Optional[PatternModel
         log.info("라벨이 한 종류뿐이라 학습할 수 없습니다 (상승/비상승이 모두 필요).")
         return None
 
-    mean = X.mean(axis=0)
-    std = X.std(axis=0)
+    # 시간 순 분할 (all_patterns 는 ts 오름차순으로 돌려준다)
+    split = int(len(y) * (1 - val_ratio))
+    X_tr, y_tr = X[:split], y[:split]
+    X_va, y_va = X[split:], y[split:]
+    if len(y_va) < 40 or len(np.unique(y_tr)) < 2:
+        log.info("검증에 쓸 표본이 부족해 학습을 건너뜁니다.")
+        return None
+
+    mean = X_tr.mean(axis=0)
+    std = X_tr.std(axis=0)
     std = np.where(std == 0, 1.0, std)
-    Z = (X - mean) / std
+    Z_tr = (X_tr - mean) / std
+    Z_va = (X_va - mean) / std
 
     # 상승 표본이 적을 때 한쪽으로 쏠리지 않도록 가중치를 준다
-    pos_weight = float(len(y) / (2 * max(y.sum(), 1)))
-    neg_weight = float(len(y) / (2 * max(len(y) - y.sum(), 1)))
-    sample_w = np.where(y == 1, pos_weight, neg_weight)
+    pos_weight = float(len(y_tr) / (2 * max(y_tr.sum(), 1)))
+    neg_weight = float(len(y_tr) / (2 * max(len(y_tr) - y_tr.sum(), 1)))
+    sample_w = np.where(y_tr == 1, pos_weight, neg_weight)
 
-    w = np.zeros(Z.shape[1])
+    w = np.zeros(Z_tr.shape[1])
     b = 0.0
     for _ in range(epochs):
-        logit = np.clip(Z @ w + b, -30, 30)
+        logit = np.clip(Z_tr @ w + b, -30, 30)
         pred = 1.0 / (1.0 + np.exp(-logit))
-        err = (pred - y) * sample_w
-        w -= lr * (Z.T @ err) / len(y)
+        err = (pred - y_tr) * sample_w
+        w -= lr * (Z_tr.T @ err) / len(y_tr)
         b -= lr * float(err.mean())
 
-    pred = 1.0 / (1.0 + np.exp(-np.clip(Z @ w + b, -30, 30)))
-    accuracy = float(((pred >= 0.5).astype(float) == y).mean())
+    def _proba(Z):
+        return 1.0 / (1.0 + np.exp(-np.clip(Z @ w + b, -30, 30)))
+
+    train_acc = float(((_proba(Z_tr) >= 0.5).astype(float) == y_tr).mean())
+
+    # --- 검증 ---
+    p_va = _proba(Z_va)
+    signal = p_va >= threshold
+    n_signals = int(signal.sum())
+    base_rate = float(y_va.mean())                      # 아무거나 샀을 때 오를 확률
+    precision = float(y_va[signal].mean()) if n_signals else 0.0
+    recall = float(signal[y_va == 1].mean()) if y_va.sum() else 0.0
+    val_acc = float((signal.astype(float) == y_va).mean())
+    edge = precision - base_rate
+
+    # 우연히 좋아 보이는 것을 걸러낸다.
+    #
+    # 신호가 적으면 실력이 없어도 적중률이 쉽게 출렁인다. 예를 들어 기준선이
+    # 28% 인데 신호 43회 중 우연히 14회를 맞히면 32.6% 가 되어 "기준선보다
+    # 낫다"고 착각하게 된다. 그래서 관측된 이득이 '동전 던지기로 이 정도가
+    # 나올 확률' 을 충분히 넘는지까지 본다.
+    #
+    #   표준오차 = sqrt(기준선 x (1-기준선) / 신호수)
+    #   z       = 이득 / 표준오차      (z >= 2 이면 우연일 확률이 약 5% 미만)
+    if n_signals > 0 and 0 < base_rate < 1:
+        std_err = float(np.sqrt(base_rate * (1 - base_rate) / n_signals))
+        z_score = edge / std_err if std_err > 0 else 0.0
+    else:
+        std_err, z_score = 0.0, 0.0
+
+    MIN_SIGNALS = 50      # 이보다 적으면 판단 근거로 삼지 않는다
+    MIN_EDGE = 0.03       # 수수료를 생각하면 최소 3%p 는 나아야 의미가 있다
+    MIN_Z = 2.0           # 우연일 확률 약 5% 미만
+    useful = bool(n_signals >= MIN_SIGNALS and edge >= MIN_EDGE and z_score >= MIN_Z)
 
     model = PatternModel(
         weights=[float(v) for v in w], bias=float(b),
         mean=[float(v) for v in mean], std=[float(v) for v in std],
         feature_names=list(FEATURE_NAMES),
         trained_at=datetime.now().isoformat(timespec="seconds"),
-        n_samples=int(len(y)), n_rising=int(y.sum()), accuracy=accuracy,
+        n_samples=int(len(y)), n_rising=int(y.sum()), accuracy=train_acc,
+        threshold=float(threshold), val_samples=int(len(y_va)),
+        val_signals=n_signals, val_precision=precision, val_recall=recall,
+        val_accuracy=val_acc, val_base_rate=base_rate, edge=edge,
+        z_score=float(z_score), is_useful=useful,
     )
-    log.info("패턴 학습 완료: 표본 %d개(상승 %d개), 정확도 %.1f%%",
-             model.n_samples, model.n_rising, accuracy * 100)
+
+    log.info("패턴 학습 완료 - 표본 %d개(상승 %d개)", model.n_samples, model.n_rising)
+    if n_signals:
+        log.info("  검증(안 본 %d개): 매수 신호 %d회, 그중 실제 상승 %.1f%% "
+                 "(아무거나 샀을 때 %.1f%%) → 이득 %+.1f%%p",
+                 model.val_samples, n_signals, precision * 100,
+                 base_rate * 100, edge * 100)
+    else:
+        log.info("  검증(안 본 %d개): 기준 확률 %.0f%% 를 넘는 매수 신호가 한 번도 없었습니다.",
+                 model.val_samples, threshold * 100)
+    if useful:
+        log.info("  판정: 쓸모 있음 (우연일 가능성 낮음, z=%.1f) → 매수 판단에 반영합니다.",
+                 z_score)
+    else:
+        reasons = []
+        if n_signals < MIN_SIGNALS:
+            reasons.append("매수 신호가 %d회뿐 (최소 %d회 필요)" % (n_signals, MIN_SIGNALS))
+        if edge < MIN_EDGE:
+            reasons.append("기준선 대비 이득 %+.1f%%p (최소 %.0f%%p 필요)"
+                           % (edge * 100, MIN_EDGE * 100))
+        elif z_score < MIN_Z:
+            reasons.append("이득이 우연일 수 있음 (z=%.1f, 2.0 이상 필요)" % z_score)
+        log.warning("  판정: 아직 근거 부족 - %s. 매수 필터는 적용을 보류합니다 "
+                    "(표본이 쌓이면 자동으로 다시 판정합니다).", " / ".join(reasons))
     return model
 
 
 def ensure_trained(exchange, database, model_path: Path,
                    target_rising: int = TARGET_RISING,
+                   threshold: float = 0.55,
                    progress=None) -> tuple[Optional[PatternModel], dict]:
     """표본을 목표치까지 채우고 학습한 모델을 돌려준다. 프로그램 시작 시 호출."""
     stats = collect_until_target(exchange, database, target_rising=target_rising,
                                  progress=progress)
-    model = train(database)
+    model = train(database, threshold=threshold)
     if model is not None:
         model.save(model_path)
     return model, stats
