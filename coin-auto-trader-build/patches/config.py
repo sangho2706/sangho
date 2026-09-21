@@ -114,6 +114,18 @@ class Settings:
     )
     report_hour_kst: int = field(default_factory=lambda: _get_int("REPORT_HOUR_KST", 9))
 
+    # --- 매수 기회 (거래가 너무 뜸할 때 늘리는 설정) ---
+    # 골든크로스는 추세가 바뀌는 순간에만 생겨서, 이미 오름세인 종목은 살
+    # 기회가 없고 한 번 팔면 다시 들어갈 방법이 없다. 그래서 '오름세인데
+    # 잠깐 눌렸다 반등하는' 지점을 두 번째 진입으로 쓴다.
+    use_pullback_entry: bool = field(
+        default_factory=lambda: _get_bool("USE_PULLBACK_ENTRY", True)
+    )
+    # 이 RSI 아래로 눌렸다가 다시 올라오면 매수. 높일수록 기회가 많아진다.
+    pullback_rsi_below: float = field(
+        default_factory=lambda: _get_float("PULLBACK_RSI_BELOW", 55.0)
+    )
+
     # --- 위험 관리 (손실이 이익보다 커지는 것을 막는 핵심 설정) ---
     # 진입가 대비 이만큼 내려가면 무조건 자른다. 0 이면 손절 안 함(위험).
     stop_loss_pct: float = field(
@@ -203,6 +215,8 @@ class Settings:
             problems.append("PATTERN_RISE_THRESHOLD_PCT 는 0보다 커야 합니다 (15 = 15%).")
         if self.pattern_horizon_bars <= 0:
             problems.append("PATTERN_HORIZON_BARS 는 1 이상이어야 합니다.")
+        if not (0 < self.pullback_rsi_below < 100):
+            problems.append("PULLBACK_RSI_BELOW 는 0과 100 사이여야 합니다 (55 권장).")
         if self.stop_loss_pct <= 0:
             problems.append(
                 "STOP_LOSS_PCT 가 0 입니다. 손절이 없으면 한 종목의 손실이 무한정 "

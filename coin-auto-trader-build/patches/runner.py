@@ -61,6 +61,8 @@ class TraderApp:
             trail_drawdown_pct=settings.trail_drawdown_pct,
             take_profit_pct=settings.take_profit_pct,
             max_hold_bars=settings.max_hold_bars,
+            use_pullback_entry=settings.use_pullback_entry,
+            pullback_rsi_below=settings.pullback_rsi_below,
         )
         self.on_tick = on_tick  # GUI 등에서 매 루프 결과를 받아가기 위한 콜백 (선택)
         self.last_snapshot: dict = {}
@@ -78,6 +80,11 @@ class TraderApp:
         self._session_trade_count: int = 0
 
         self._last_account_error = ""
+
+        # 이번 주기에 '왜 매수하지 않았는지' 를 세는 곳.
+        # 매매가 뜸할 때 어느 관문이 막고 있는지 추측하지 않고 바로 보기 위함이다.
+        self._skip_counts: dict[str, int] = {}
+        self.last_skip_summary: str = ""
 
         # 상승 기록용 기준가 (market -> (관측시각, 기준가))
         self._rise_baseline: dict[str, tuple[datetime, float]] = {}
@@ -333,6 +340,7 @@ class TraderApp:
 
     def trade_loop_once(self) -> None:
         price_cache: dict[str, float] = {}
+        self._skip_counts = {}
         self._maybe_reset_day(price_cache)
         self._maybe_refresh_watchlist()
 
@@ -373,6 +381,7 @@ class TraderApp:
             "session_trades": self._session_trade_count,
             "pattern": self.pattern_summary(),
             "account": self.account_overview(total_value),
+            "skip_summary": self.last_skip_summary,
         }
         if self.on_tick:
             try:
@@ -380,13 +389,33 @@ class TraderApp:
             except Exception:
                 log.exception("on_tick 콜백 처리 중 오류")
 
+        self._log_skip_summary()
         self._maybe_retrain()
         self._maybe_generate_report()
+
+    def _log_skip_summary(self) -> None:
+        """이번 주기에 각 종목이 어떻게 처리됐는지 한 줄로 남긴다.
+
+        매매가 뜸하다고 느껴질 때 어느 관문이 막고 있는지 바로 알 수 있다.
+        """
+        if not self._skip_counts:
+            self.last_skip_summary = ""
+            return
+        order = ["매수 실행", "이미 보유 중", "매수 신호 없음", "패턴 모델이 거부",
+                 "예산 부족", "일일 손실 한도", "매도 신호 구간", "캔들 부족"]
+        parts = [f"{k} {self._skip_counts[k]}" for k in order if self._skip_counts.get(k)]
+        for k, v in self._skip_counts.items():
+            if k not in order:
+                parts.append(f"{k} {v}")
+        self.last_skip_summary = " / ".join(parts)
+        log.info("[이번 주기] 감시 %d종목 → %s",
+                 len(self._watchlist), self.last_skip_summary)
 
     def _process_market(self, market: str, allow_buy: bool, price_cache: dict) -> None:
         df = self.exchange.get_ohlcv(market, interval="minute15", count=200)
         if df is None or len(df) < 30:
             log.warning("%s 캔들 데이터를 충분히 가져오지 못했습니다.", market)
+            self._note_skip("캔들 부족")
             return
 
         price = float(df["close"].iloc[-1])
@@ -407,18 +436,29 @@ class TraderApp:
         #  - signal 모드에서는 전략이 조용하더라도 학습 모델이 '급등 직전 모습'
         #    을 발견하면 스스로 매수를 낸다. 이것이 오르기 전에 미리 사는 경로다.
         buy_reason = None
-        if allow_buy:
-            if decision.signal == "buy":
-                if self._pattern_allows_buy(market, df):
-                    buy_reason = decision.reason
-            elif decision.signal == "hold":
-                buy_reason = self._pattern_entry_signal(market, df)
+        holding = self.ledger.get_position(market).volume > 0
+        if not allow_buy:
+            self._note_skip("일일 손실 한도")
+        elif holding:
+            self._note_skip("이미 보유 중")
+        elif decision.signal == "buy":
+            if self._pattern_allows_buy(market, df):
+                buy_reason = decision.reason
+            else:
+                self._note_skip("패턴 모델이 거부")
+        elif decision.signal == "hold":
+            buy_reason = self._pattern_entry_signal(market, df)
+            if buy_reason is None:
+                self._note_skip("매수 신호 없음")
+        else:
+            self._note_skip("매도 신호 구간")
 
         if buy_reason:
             krw_amount = self.ledger.max_buyable_krw(market, self.settings.max_position_ratio)
             if krw_amount < 5000:
-                log.info("%s 매수 신호이나 배정 가능 금액이 너무 작음 (%.0f원). 스킵.",
-                          market, krw_amount)
+                log.info("%s 매수 신호가 나왔지만 쓸 수 있는 돈이 %.0f원뿐이라 못 삽니다. "
+                          "(예산을 늘리거나 종목당 비중을 조정하세요)", market, krw_amount)
+                self._note_skip("예산 부족")
                 return
             try:
                 order = self.exchange.buy_market(market, krw_amount, price)
@@ -429,6 +469,7 @@ class TraderApp:
             self.db.log_trade(market, "buy", order.price, order.volume, order.krw_amount,
                                order.fee_krw, buy_reason, mode, self.strategy.name)
             self._session_trade_count += 1
+            self._note_skip("매수 실행")
             log.info("[매수] %s %.0f원 @ %.0f (%s)", market, order.krw_amount, order.price,
                       buy_reason)
 
@@ -458,6 +499,9 @@ class TraderApp:
                       order.price, realized, decision.reason)
         else:
             log.debug("%s hold: %s", market, decision.reason)
+
+    def _note_skip(self, reason: str) -> None:
+        self._skip_counts[reason] = self._skip_counts.get(reason, 0) + 1
 
     def _collect_live_patterns(self, market: str, df) -> None:
         """구동 중에도 학습 표본을 계속 모은다.
@@ -582,6 +626,11 @@ class TraderApp:
                 self._last_account_error = reason
             return {"available": False, "reason": reason}
         self._last_account_error = ""
+
+        # 이번 주기에 '왜 매수하지 않았는지' 를 세는 곳.
+        # 매매가 뜸할 때 어느 관문이 막고 있는지 추측하지 않고 바로 보기 위함이다.
+        self._skip_counts: dict[str, int] = {}
+        self.last_skip_summary: str = ""
 
         account_total = float(acc["total"])
         if self.settings.live_trading:

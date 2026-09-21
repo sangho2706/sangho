@@ -103,7 +103,9 @@ class RsiMaCrossStrategy(Strategy):
                  trail_drawdown_pct: float = 0.03,
                  take_profit_pct: float = 0.0,
                  max_hold_bars: int = 0,
-                 ride_winners: bool = True):
+                 ride_winners: bool = True,
+                 use_pullback_entry: bool = True,
+                 pullback_rsi_below: float = 45.0):
         self.short_window = short_window
         self.long_window = long_window
         self.rsi_period = rsi_period
@@ -115,6 +117,8 @@ class RsiMaCrossStrategy(Strategy):
         self.take_profit_pct = take_profit_pct
         self.max_hold_bars = max_hold_bars
         self.ride_winners = ride_winners
+        self.use_pullback_entry = use_pullback_entry
+        self.pullback_rsi_below = pullback_rsi_below
 
     # ---------- 위험 관리 (지표보다 우선) ----------
 
@@ -184,6 +188,26 @@ class RsiMaCrossStrategy(Strategy):
                 "buy",
                 f"골든크로스 발생 + RSI {curr_rsi:.1f} < {self.rsi_buy_below} (과매도권 이탈)",
             )
+
+        # 두 번째 진입 경로 - 눌림목 매수.
+        #
+        # 골든크로스는 추세가 바뀌는 순간에만 한 번 생긴다. 그래서 이미 오름세인
+        # 종목은 아무리 좋아 보여도 살 기회가 없고, 한 번 팔고 나면 다시 들어갈
+        # 방법이 없다. 실제로 매수가 안 나가는 가장 큰 이유가 이것이었다.
+        #
+        # 그래서 '오름세는 유지되는데 잠깐 눌렸다가 다시 올라오는' 지점을
+        # 두 번째 진입으로 잡는다. 조건은 세 가지다.
+        #   1) 단기 이동평균이 장기 위에 있다 (오름세가 살아 있다)
+        #   2) 직전 봉에서 RSI 가 기준 아래로 내려가 있었다 (눌렸다)
+        #   3) 이번 봉에서 그 기준 위로 다시 올라왔다 (돌아섰다)
+        if (self.use_pullback_entry and not pos.has_position
+                and curr_diff > 0):
+            prev_rsi = rsi.iloc[-2]
+            if prev_rsi < self.pullback_rsi_below <= curr_rsi:
+                return Decision(
+                    "buy",
+                    f"눌림목 반등 (오름세 유지, RSI {prev_rsi:.1f}→{curr_rsi:.1f})",
+                )
 
         # 상승을 끝까지 타기 위한 처리.
         #

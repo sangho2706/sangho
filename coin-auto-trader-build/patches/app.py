@@ -179,6 +179,17 @@ class SettingsDialog(tk.Toplevel):
         text_field("EXCLUDE_MARKETS", "자동 추천에서 제외할 마켓",
                    "KRW-USDT,KRW-USDC,KRW-DAI,KRW-TUSD,KRW-BUSD")
 
+        bool_field("USE_PULLBACK_ENTRY",
+                   "눌림목 매수 사용 (매수 기회를 늘림)", "true")
+        text_field("PULLBACK_RSI_BELOW", "눌림목 기준 RSI (높일수록 적극적)", "55", width=10)
+        ttk.Label(
+            scroll_frame, foreground="#555", wraplength=560, justify="left",
+            text="골든크로스는 추세가 바뀌는 순간에만 생겨서, 이미 오르는 종목은\n"
+                 "살 기회가 없고 한 번 팔면 다시 들어가기 어렵습니다.\n"
+                 "눌림목 매수는 '오름세인데 잠깐 눌렸다 반등할 때' 를 추가로 잡습니다.\n"
+                 "  · 50 = 신중   · 55 = 권장   · 60 = 적극(거래 많고 낙폭도 큼)",
+        ).pack(anchor="w", pady=(2, 6))
+
         section("5. 손절과 익절 (손실이 커지는 것을 막는 설정)")
         ttk.Label(
             scroll_frame, foreground="#555", wraplength=560, justify="left",
@@ -283,6 +294,9 @@ class SettingsDialog(tk.Toplevel):
             if int(values["PATTERN_TARGET_RISING"]) <= 0:
                 raise ValueError("모을 급등 사례 개수는 1 이상이어야 합니다.")
 
+            pb = float(values["PULLBACK_RSI_BELOW"])
+            if not (0 < pb < 100):
+                raise ValueError("눌림목 기준 RSI 는 0과 100 사이여야 합니다 (55 권장).")
             stop_loss = float(values["STOP_LOSS_PCT"])
             if not (0 <= stop_loss < 1):
                 raise ValueError("손절선은 0 이상 1 미만이어야 합니다 (0.05 = 5%).")
