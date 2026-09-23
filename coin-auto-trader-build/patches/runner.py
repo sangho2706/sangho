@@ -63,6 +63,8 @@ class TraderApp:
             max_hold_bars=settings.max_hold_bars,
             use_pullback_entry=settings.use_pullback_entry,
             pullback_rsi_below=settings.pullback_rsi_below,
+            use_strong_trend_entry=settings.use_strong_trend_entry,
+            strong_entry_rsi_max=settings.strong_entry_rsi_max,
         )
         self.on_tick = on_tick  # GUI 등에서 매 루프 결과를 받아가기 위한 콜백 (선택)
         self.last_snapshot: dict = {}

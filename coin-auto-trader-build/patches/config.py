@@ -93,7 +93,11 @@ class Settings:
         default_factory=lambda: _get_float("MIN_24H_VOLUME_KRW", 3_000_000_000)
     )
     max_24h_change_rate_for_entry: float = field(
-        default_factory=lambda: _get_float("MAX_24H_CHANGE_RATE_FOR_ENTRY", 0.15)
+        # 상승장에서는 대부분의 코인이 15% 넘게 오른 상태다. 상한을 15%로
+        # 두면 강세장일수록 후보가 오히려 줄어드는 역설이 생긴다("다 오르는데
+        # 하나도 못 산다"). 40%까지 열어 두고, 리스크는 손절/트레일링으로
+        # 관리한다.
+        default_factory=lambda: _get_float("MAX_24H_CHANGE_RATE_FOR_ENTRY", 0.40)
     )
     market_rescan_interval_min: int = field(
         default_factory=lambda: _get_int("MARKET_RESCAN_INTERVAL_MIN", 60)
@@ -124,6 +128,17 @@ class Settings:
     # 이 RSI 아래로 눌렸다가 다시 올라오면 매수. 높일수록 기회가 많아진다.
     pullback_rsi_below: float = field(
         default_factory=lambda: _get_float("PULLBACK_RSI_BELOW", 55.0)
+    )
+    # 상승장에서는 RSI 가 오래 60 이상에 머문다(강하게 오르면 90% 이상의
+    # 시간을 60 이상에서 보낸다). 골든크로스/눌림목이 전부 RSI<55~60 을
+    # 요구하면 강한 상승장에서 매수 기회가 거의 사라진다. 그래서 'RSI 가
+    # 높아도 상승 추세 자체가 강해지는 중이면 산다' 는 경로를 따로 둔다.
+    use_strong_trend_entry: bool = field(
+        default_factory=lambda: _get_bool("USE_STRONG_TREND_ENTRY", True)
+    )
+    # 이 값보다 RSI 가 높으면(과열) 강한 추세여도 사지 않는다.
+    strong_entry_rsi_max: float = field(
+        default_factory=lambda: _get_float("STRONG_ENTRY_RSI_MAX", 85.0)
     )
 
     # --- 위험 관리 (손실이 이익보다 커지는 것을 막는 핵심 설정) ---
@@ -217,6 +232,8 @@ class Settings:
             problems.append("PATTERN_HORIZON_BARS 는 1 이상이어야 합니다.")
         if not (0 < self.pullback_rsi_below < 100):
             problems.append("PULLBACK_RSI_BELOW 는 0과 100 사이여야 합니다 (55 권장).")
+        if not (0 < self.strong_entry_rsi_max <= 100):
+            problems.append("STRONG_ENTRY_RSI_MAX 는 0보다 크고 100 이하여야 합니다 (85 권장).")
         if self.stop_loss_pct <= 0:
             problems.append(
                 "STOP_LOSS_PCT 가 0 입니다. 손절이 없으면 한 종목의 손실이 무한정 "

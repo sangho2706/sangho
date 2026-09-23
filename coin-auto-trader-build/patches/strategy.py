@@ -105,7 +105,9 @@ class RsiMaCrossStrategy(Strategy):
                  max_hold_bars: int = 0,
                  ride_winners: bool = True,
                  use_pullback_entry: bool = True,
-                 pullback_rsi_below: float = 45.0):
+                 pullback_rsi_below: float = 45.0,
+                 use_strong_trend_entry: bool = True,
+                 strong_entry_rsi_max: float = 85.0):
         self.short_window = short_window
         self.long_window = long_window
         self.rsi_period = rsi_period
@@ -119,6 +121,8 @@ class RsiMaCrossStrategy(Strategy):
         self.ride_winners = ride_winners
         self.use_pullback_entry = use_pullback_entry
         self.pullback_rsi_below = pullback_rsi_below
+        self.use_strong_trend_entry = use_strong_trend_entry
+        self.strong_entry_rsi_max = strong_entry_rsi_max
 
     # ---------- 위험 관리 (지표보다 우선) ----------
 
@@ -187,6 +191,26 @@ class RsiMaCrossStrategy(Strategy):
             return Decision(
                 "buy",
                 f"골든크로스 발생 + RSI {curr_rsi:.1f} < {self.rsi_buy_below} (과매도권 이탈)",
+            )
+
+        # 세 번째 진입 경로 - 강한 상승 추세 매수.
+        #
+        # 상승장에서는 RSI 가 한동안 60 이상에 머문다(강하게 오르면 90% 이상의
+        # 시간을 60 이상에서 보낸다). 골든크로스와 눌림목이 전부 RSI<55~60 을
+        # 요구하므로, 강한 상승장에서는 두 경로 다 거의 열리지 않는다.
+        # "코인들 다 오르는데 수익이 없다" 는 증상의 직접적인 원인이다.
+        #
+        # 그래서 RSI 자체가 아니라 '추세가 실제로 살아 있는가' 로 진입 여부를
+        # 판단하는 경로를 따로 둔다. 단기 이동평균이 장기 위에서 벌어지는
+        # 중이면(추세가 강해지는 중) RSI 가 높아도 진입한다. RSI 필터는 대신
+        # 과열(strong_entry_rsi_max) 에서만 막는다.
+        if (self.use_strong_trend_entry and not pos.has_position
+                and curr_diff > 0 and prev_diff > 0
+                and curr_diff > prev_diff              # 이격이 벌어지는 중 = 추세 강화
+                and curr_rsi < self.strong_entry_rsi_max):
+            return Decision(
+                "buy",
+                f"상승 추세 강화 중 (RSI {curr_rsi:.1f} < {self.strong_entry_rsi_max})",
             )
 
         # 두 번째 진입 경로 - 눌림목 매수.

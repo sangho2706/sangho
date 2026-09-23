@@ -164,12 +164,15 @@ class SettingsDialog(tk.Toplevel):
         text_field("MIN_24H_CHANGE_RATE_FOR_ENTRY",
                    "얼마나 오른 종목을 살지 (하한)", "0", width=10)
         text_field("MAX_24H_CHANGE_RATE_FOR_ENTRY",
-                   "너무 오른 건 제외 (상한)", "0.15", width=10)
+                   "너무 오른 건 제외 (상한)", "0.40", width=10)
         ttk.Label(
             scroll_frame, foreground="#555", wraplength=560, justify="left",
-            text="24시간 등락률 기준입니다. 0.15 = 15%.\n"
-                 "  · 하한 0 / 상한 0.15  → 조금 오른 종목 위주 (기본)\n"
+            text="24시간 등락률 기준입니다. 0.40 = 40%.\n"
+                 "  · 하한 0 / 상한 0.40  → 상승장에서도 후보가 충분히 남음 (기본)\n"
                  "  · 하한 0.15 / 상한 0.4 → 15% 이상 크게 오른 종목만 노림\n"
+                 "  ※ 상한을 너무 낮추면(예: 0.15) 상승장에서 대부분의 코인이\n"
+                 "     이미 그만큼 올라 있어 후보가 오히려 줄어듭니다\n"
+                 "     (\"다 오르는데 하나도 못 산다\" 증상의 원인).\n"
                  "  ※ 하한을 올리면 상한도 반드시 같이 올리세요. 하한이 상한보다\n"
                  "     크거나 같으면 살 종목이 하나도 남지 않습니다.",
         ).pack(anchor="w", pady=(2, 6))
@@ -188,6 +191,18 @@ class SettingsDialog(tk.Toplevel):
                  "살 기회가 없고 한 번 팔면 다시 들어가기 어렵습니다.\n"
                  "눌림목 매수는 '오름세인데 잠깐 눌렸다 반등할 때' 를 추가로 잡습니다.\n"
                  "  · 50 = 신중   · 55 = 권장   · 60 = 적극(거래 많고 낙폭도 큼)",
+        ).pack(anchor="w", pady=(2, 6))
+
+        bool_field("USE_STRONG_TREND_ENTRY",
+                   "상승장 대응 매수 사용 (RSI 높아도 추세면 매수)", "true")
+        text_field("STRONG_ENTRY_RSI_MAX", "이 RSI 넘으면 과열로 보고 매수 안 함", "85", width=10)
+        ttk.Label(
+            scroll_frame, foreground="#555", wraplength=560, justify="left",
+            text="강하게 오르는 코인은 RSI 가 오래 60 이상에 머뭅니다. 골든크로스/\n"
+                 "눌림목만 쓰면 이럴 때 매수 기회가 거의 사라집니다(\"다 오르는데\n"
+                 "하나도 못 산다\"). 이 옵션은 RSI 가 높아도 상승 이동평균의\n"
+                 "간격이 계속 벌어지는 중(추세가 강해지는 중)이면 매수합니다.\n"
+                 "과열 방지선(기본 85) 위에서는 이 경로도 매수하지 않습니다.",
         ).pack(anchor="w", pady=(2, 6))
 
         section("5. 손절과 익절 (손실이 커지는 것을 막는 설정)")
@@ -297,6 +312,9 @@ class SettingsDialog(tk.Toplevel):
             pb = float(values["PULLBACK_RSI_BELOW"])
             if not (0 < pb < 100):
                 raise ValueError("눌림목 기준 RSI 는 0과 100 사이여야 합니다 (55 권장).")
+            strong_max = float(values["STRONG_ENTRY_RSI_MAX"])
+            if not (0 < strong_max <= 100):
+                raise ValueError("과열 방지 RSI 는 0보다 크고 100 이하여야 합니다 (85 권장).")
             stop_loss = float(values["STOP_LOSS_PCT"])
             if not (0 <= stop_loss < 1):
                 raise ValueError("손절선은 0 이상 1 미만이어야 합니다 (0.05 = 5%).")
