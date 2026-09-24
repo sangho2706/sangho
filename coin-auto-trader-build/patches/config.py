@@ -118,6 +118,15 @@ class Settings:
     )
     report_hour_kst: int = field(default_factory=lambda: _get_int("REPORT_HOUR_KST", 9))
 
+    # --- 손절/트레일링 빠른 점검 ---
+    # 실거래 데이터에서 손절 손실이 설정한 손절선을 넘어 체결되는 경우가
+    # 있었다(주 판단 주기가 5분이라 그 사이에 가격이 더 빠져도 모름). 이
+    # 초(간격)마다 보유 종목의 현재가만 가볍게 확인해 손절/트레일링을 더
+    # 빠르게 잡는다. 0 이면 끈다(기존처럼 판단 주기에만 확인).
+    risk_check_interval_sec: int = field(
+        default_factory=lambda: _get_int("RISK_CHECK_INTERVAL_SEC", 20)
+    )
+
     # --- 매수 기회 (거래가 너무 뜸할 때 늘리는 설정) ---
     # 골든크로스는 추세가 바뀌는 순간에만 생겨서, 이미 오름세인 종목은 살
     # 기회가 없고 한 번 팔면 다시 들어갈 방법이 없다. 그래서 '오름세인데
@@ -139,6 +148,11 @@ class Settings:
     # 이 값보다 RSI 가 높으면(과열) 강한 추세여도 사지 않는다.
     strong_entry_rsi_max: float = field(
         default_factory=lambda: _get_float("STRONG_ENTRY_RSI_MAX", 85.0)
+    )
+    # 눌림목 매수 판정 시 RSI 가 한 봉 만에 이보다 크게 뛰었으면(스파이크)
+    # 반등이 아니라 급등 꼭대기일 가능성이 높다고 보고 사지 않는다.
+    pullback_max_rsi_jump: float = field(
+        default_factory=lambda: _get_float("PULLBACK_MAX_RSI_JUMP", 20.0)
     )
 
     # --- 위험 관리 (손실이 이익보다 커지는 것을 막는 핵심 설정) ---
@@ -234,6 +248,10 @@ class Settings:
             problems.append("PULLBACK_RSI_BELOW 는 0과 100 사이여야 합니다 (55 권장).")
         if not (0 < self.strong_entry_rsi_max <= 100):
             problems.append("STRONG_ENTRY_RSI_MAX 는 0보다 크고 100 이하여야 합니다 (85 권장).")
+        if self.pullback_max_rsi_jump <= 0:
+            problems.append("PULLBACK_MAX_RSI_JUMP 는 0보다 커야 합니다 (20 권장).")
+        if self.risk_check_interval_sec < 0:
+            problems.append("RISK_CHECK_INTERVAL_SEC 는 0 이상이어야 합니다 (0=끔, 20 권장).")
         if self.stop_loss_pct <= 0:
             problems.append(
                 "STOP_LOSS_PCT 가 0 입니다. 손절이 없으면 한 종목의 손실이 무한정 "

@@ -205,7 +205,28 @@ class SettingsDialog(tk.Toplevel):
                  "과열 방지선(기본 85) 위에서는 이 경로도 매수하지 않습니다.",
         ).pack(anchor="w", pady=(2, 6))
 
+        text_field("PULLBACK_MAX_RSI_JUMP",
+                   "눌림목 스파이크 방지 (RSI 급상승 상한)", "20", width=10)
+        ttk.Label(
+            scroll_frame, foreground="#555", wraplength=560, justify="left",
+            text="실제 거래 기록에서 눌림목 매수 일부가 사실은 급등 스파이크\n"
+                 "꼭대기였습니다(RSI가 한 봉 만에 53→85처럼 급등한 뒤 되돌아와\n"
+                 "손실로 매도). 한 봉 만에 RSI 가 이보다 크게 뛴 경우는 완만한\n"
+                 "반등이 아니라고 보고 매수하지 않습니다.",
+        ).pack(anchor="w", pady=(2, 6))
+
         section("5. 손절과 익절 (손실이 커지는 것을 막는 설정)")
+        text_field("RISK_CHECK_INTERVAL_SEC",
+                   "손절/트레일링 빠른 확인 주기 (초, 0=끔)", "20", width=10)
+        ttk.Label(
+            scroll_frame, foreground="#555", wraplength=560, justify="left",
+            text="실제 거래 기록에서 손절이 설정한 선을 넘어 체결된 사례가\n"
+                 "있었습니다(기준 -5%인데 -8.4%, 기준 -4%인데 -5.9%). 원인은\n"
+                 "전체 판단(5분 주기) 사이에 가격이 더 빠져도 다음 판단 때까지\n"
+                 "모른다는 것이었습니다. 이 값을 20초로 두면 보유 종목의 현재가만\n"
+                 "가볍게 20초마다 확인해 손절/트레일링을 훨씬 빠르게 잡습니다.\n"
+                 "(매수/매도 판단 자체는 여전히 아래 '매매 판단 주기'를 따릅니다)"
+        ).pack(anchor="w", pady=(2, 8))
         ttk.Label(
             scroll_frame, foreground="#555", wraplength=560, justify="left",
             text="전부 소수로 넣습니다. 0.05 = 5%.",
@@ -315,6 +336,12 @@ class SettingsDialog(tk.Toplevel):
             strong_max = float(values["STRONG_ENTRY_RSI_MAX"])
             if not (0 < strong_max <= 100):
                 raise ValueError("과열 방지 RSI 는 0보다 크고 100 이하여야 합니다 (85 권장).")
+            max_jump = float(values["PULLBACK_MAX_RSI_JUMP"])
+            if max_jump <= 0:
+                raise ValueError("눌림목 스파이크 방지 값은 0보다 커야 합니다 (20 권장).")
+            risk_interval = int(values["RISK_CHECK_INTERVAL_SEC"])
+            if risk_interval < 0:
+                raise ValueError("손절/트레일링 빠른 확인 주기는 0 이상이어야 합니다 (0=끔, 20 권장).")
             stop_loss = float(values["STOP_LOSS_PCT"])
             if not (0 <= stop_loss < 1):
                 raise ValueError("손절선은 0 이상 1 미만이어야 합니다 (0.05 = 5%).")

@@ -65,6 +65,7 @@ class TraderApp:
             pullback_rsi_below=settings.pullback_rsi_below,
             use_strong_trend_entry=settings.use_strong_trend_entry,
             strong_entry_rsi_max=settings.strong_entry_rsi_max,
+            pullback_max_rsi_jump=settings.pullback_max_rsi_jump,
         )
         self.on_tick = on_tick  # GUI 등에서 매 루프 결과를 받아가기 위한 콜백 (선택)
         self.last_snapshot: dict = {}
@@ -476,34 +477,74 @@ class TraderApp:
                       buy_reason)
 
         elif decision.signal == "sell":
-            actual_volume = None
-            if self.settings.live_trading:
-                actual_volume = self._get_actual_balance_volume(market)
-            volume = self.ledger.sellable_volume(market, actual_volume)
-            if volume <= 0:
-                return
-            try:
-                order = self.exchange.sell_market(market, volume, price)
-            except Exception:
-                log.exception("%s 매도 주문 실패", market)
-                return
-            try:
-                realized = self.ledger.record_sell(
-                    market, order.volume, order.krw_amount, order.fee_krw
-                )
-            except LedgerError:
-                log.exception("장부 불일치로 매도 기록 실패 (수동 매매와 충돌 가능성) - 확인 필요")
-                return
-            self.db.log_trade(market, "sell", order.price, order.volume, order.krw_amount,
-                               order.fee_krw, decision.reason, mode, self.strategy.name, realized)
-            self._session_trade_count += 1
-            log.info("[매도] %s %.0f원 @ %.0f 실현손익 %.0f원 (%s)", market, order.krw_amount,
-                      order.price, realized, decision.reason)
+            self._execute_sell(market, price, decision.reason)
         else:
             log.debug("%s hold: %s", market, decision.reason)
 
+    def _execute_sell(self, market: str, price: float, reason: str) -> bool:
+        """매도를 실행한다. 메인 판단 루프와 빠른 위험 점검(아래 _fast_risk_check)
+        양쪽에서 공유하는 하나의 경로다 - 매도 로직이 두 곳에 따로 있으면
+        한쪽만 고치는 실수가 생기기 쉽다."""
+        mode = "live" if self.settings.live_trading else "paper"
+        actual_volume = None
+        if self.settings.live_trading:
+            actual_volume = self._get_actual_balance_volume(market)
+        volume = self.ledger.sellable_volume(market, actual_volume)
+        if volume <= 0:
+            return False
+        try:
+            order = self.exchange.sell_market(market, volume, price)
+        except Exception:
+            log.exception("%s 매도 주문 실패", market)
+            return False
+        try:
+            realized = self.ledger.record_sell(
+                market, order.volume, order.krw_amount, order.fee_krw
+            )
+        except LedgerError:
+            log.exception("장부 불일치로 매도 기록 실패 (수동 매매와 충돌 가능성) - 확인 필요")
+            return False
+        self.db.log_trade(market, "sell", order.price, order.volume, order.krw_amount,
+                           order.fee_krw, reason, mode, self.strategy.name, realized)
+        self._session_trade_count += 1
+        log.info("[매도] %s %.0f원 @ %.0f 실현손익 %.0f원 (%s)", market, order.krw_amount,
+                  order.price, realized, reason)
+        return True
+
     def _note_skip(self, reason: str) -> None:
         self._skip_counts[reason] = self._skip_counts.get(reason, 0) + 1
+
+    def _fast_risk_check(self) -> None:
+        """손절/트레일링이 늦게 걸리는 문제를 줄이기 위한 빠른 점검.
+
+        실거래 데이터를 보면 손절 손실(-47,734원)이 순손실(-32,147원) 전체보다
+        컸고, 설정한 손절선을 넘어서 체결된 경우가 있었다(예: 기준 -5%인데
+        -8.4%, 기준 -4%인데 -5.9%). 원인은 손절 판단이 전체 판단 루프
+        (기본 5분)에 묶여 있어서, 그 사이에 가격이 손절선을 훌쩍 넘어가도
+        다음 판단 시점까지 모른다는 것이다.
+
+        캔들을 다시 받아 지표를 계산하는 무거운 판단(golden/dead cross, RSI)은
+        그대로 5분 주기를 유지하되, '지금 들고 있는 종목이 손절/트레일링
+        선을 넘었는가' 만은 현재가 조회(인증 불필요, 가벼움) 만으로 훨씬
+        자주 확인한다. 보유 종목이 보통 1~3개뿐이라 호출 부담도 작다.
+        """
+        held = [m for m, p in self.ledger.positions.items() if p.volume > 0]
+        for market in held:
+            try:
+                price = self.exchange.get_current_price(market)
+            except Exception:
+                log.debug("%s 빠른 위험 점검용 현재가 조회 실패 (무시)", market, exc_info=True)
+                continue
+            self.ledger.update_high_water(market, price)
+            pos = self.ledger.position_state(market)
+            try:
+                risk = self.strategy._risk_exit(price, pos)
+            except Exception:
+                log.debug("%s 빠른 위험 점검 판단 실패 (무시)", market, exc_info=True)
+                continue
+            if risk is not None and risk.signal == "sell":
+                log.info("[빠른 위험 점검] %s", market)
+                self._execute_sell(market, price, risk.reason)
 
     def _collect_live_patterns(self, market: str, df) -> None:
         """구동 중에도 학습 표본을 계속 모은다.
@@ -689,6 +730,8 @@ class TraderApp:
                                 else "루프 종료")
 
     def _run_loop(self, stop_event, interval_sec: float) -> None:
+        risk_interval = max(self.settings.risk_check_interval_sec, 0)
+        since_risk_check = 0.0
         while stop_event is None or not stop_event.is_set():
             start = time.time()
             try:
@@ -705,6 +748,17 @@ class TraderApp:
                 chunk = min(1.0, sleep_for - slept)
                 time.sleep(chunk)
                 slept += chunk
+
+                # 판단 루프(interval_sec, 보통 5분) 사이사이에 손절/트레일링만
+                # 현재가로 자주 확인한다. 0 이면 끈 것이다.
+                if risk_interval > 0:
+                    since_risk_check += chunk
+                    if since_risk_check >= risk_interval:
+                        since_risk_check = 0.0
+                        try:
+                            self._fast_risk_check()
+                        except Exception:
+                            log.exception("빠른 위험 점검 중 오류 (다음 주기에 재시도)")
         log.info("중지 신호를 받아 매매 루프를 종료합니다.")
 
 

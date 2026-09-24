@@ -127,6 +127,21 @@ class AutoLedger:
         room_in_position = max(position_cap - current_pos.cost_basis_krw, 0.0)
         return min(room_in_position, self.cash_krw)
 
+    def update_high_water(self, market: str, price: float) -> None:
+        """최고가만 갱신한다 (보유 기간은 건드리지 않음).
+
+        빠른 위험 점검(주기 사이사이 현재가만 자주 확인)에서 쓴다.
+        touch_position 은 '판단 주기 한 번' 을 의미하므로 매번 부르면
+        보유 기간이 실제보다 훨씬 빨리 늘어난다. 이 메서드는 그 부작용
+        없이 트레일링 스톱의 기준(최고가)만 최신으로 유지한다.
+        """
+        pos = self.positions.get(market)
+        if pos is None or pos.volume <= 0:
+            return
+        if price > pos.high_water_price:
+            pos.high_water_price = price
+            self._save()
+
     def touch_position(self, market: str, price: float) -> None:
         """판단 주기마다 한 번 호출. 보유 중이면 최고가를 갱신하고 보유 기간을 센다.
 

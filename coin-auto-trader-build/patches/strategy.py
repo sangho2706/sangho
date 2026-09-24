@@ -107,7 +107,8 @@ class RsiMaCrossStrategy(Strategy):
                  use_pullback_entry: bool = True,
                  pullback_rsi_below: float = 45.0,
                  use_strong_trend_entry: bool = True,
-                 strong_entry_rsi_max: float = 85.0):
+                 strong_entry_rsi_max: float = 85.0,
+                 pullback_max_rsi_jump: float = 20.0):
         self.short_window = short_window
         self.long_window = long_window
         self.rsi_period = rsi_period
@@ -123,6 +124,7 @@ class RsiMaCrossStrategy(Strategy):
         self.pullback_rsi_below = pullback_rsi_below
         self.use_strong_trend_entry = use_strong_trend_entry
         self.strong_entry_rsi_max = strong_entry_rsi_max
+        self.pullback_max_rsi_jump = pullback_max_rsi_jump
 
     # ---------- 위험 관리 (지표보다 우선) ----------
 
@@ -227,7 +229,14 @@ class RsiMaCrossStrategy(Strategy):
         if (self.use_pullback_entry and not pos.has_position
                 and curr_diff > 0):
             prev_rsi = rsi.iloc[-2]
-            if prev_rsi < self.pullback_rsi_below <= curr_rsi:
+            rsi_jump = curr_rsi - prev_rsi
+            # 실거래 데이터에서 '눌림목 반등'이라며 산 것 중 일부는 사실 급등
+            # 스파이크의 꼭대기였다(예: RSI 53.5 → 85.1 이 한 봉 만에 발생,
+            # 2분 뒤 되돌아와 손실로 매도). 진짜 눌림목-반등은 완만하게 기준선을
+            # 넘는다. 한 봉 만에 너무 크게 뛰었으면(스파이크) 이미 고점일
+            # 가능성이 높으므로 거른다.
+            if (prev_rsi < self.pullback_rsi_below <= curr_rsi
+                    and rsi_jump <= self.pullback_max_rsi_jump):
                 return Decision(
                     "buy",
                     f"눌림목 반등 (오름세 유지, RSI {prev_rsi:.1f}→{curr_rsi:.1f})",
