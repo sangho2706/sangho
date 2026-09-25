@@ -206,13 +206,21 @@ class RsiMaCrossStrategy(Strategy):
         # 판단하는 경로를 따로 둔다. 단기 이동평균이 장기 위에서 벌어지는
         # 중이면(추세가 강해지는 중) RSI 가 높아도 진입한다. RSI 필터는 대신
         # 과열(strong_entry_rsi_max) 에서만 막는다.
+        # 실거래 데이터에서 이 경로가 문제를 일으켰다: strong_entry_rsi_max
+        # 기본값(85)이 과매수 매도 기준(rsi_sell_above, 기본 75)보다 높아서
+        # RSI 76~80 구간에서도 매수가 나갔다. 그런데 몇 분 뒤 판단에서 RSI가
+        # 조금만 더 있어도(또는 그대로여도) 곧바로 'RSI 과매수' 매도에 걸려,
+        # 같은 종목을 하루에 6~14번씩 사고파는 손실 반복이 나타났다(PROM:
+        # RSI 80.3 매수 → 2분 뒤 RSI 78.1 매도, 3연속 소액 손실).
+        # 매수 상한이 매도 기준을 넘지 않도록, 항상 그보다 낮게 강제한다.
+        effective_strong_max = min(self.strong_entry_rsi_max, self.rsi_sell_above)
         if (self.use_strong_trend_entry and not pos.has_position
                 and curr_diff > 0 and prev_diff > 0
                 and curr_diff > prev_diff              # 이격이 벌어지는 중 = 추세 강화
-                and curr_rsi < self.strong_entry_rsi_max):
+                and curr_rsi < effective_strong_max):
             return Decision(
                 "buy",
-                f"상승 추세 강화 중 (RSI {curr_rsi:.1f} < {self.strong_entry_rsi_max})",
+                f"상승 추세 강화 중 (RSI {curr_rsi:.1f} < {effective_strong_max})",
             )
 
         # 두 번째 진입 경로 - 눌림목 매수.

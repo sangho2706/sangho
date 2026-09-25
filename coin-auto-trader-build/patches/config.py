@@ -13,6 +13,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# strategy.RsiMaCrossStrategy 의 rsi_sell_above 기본값과 같아야 한다.
+# 아직 .env 로 바꿀 수 있는 설정이 아니라서(전략 생성자에만 있음) 여기서는
+# 참조용 상수로만 둔다 - 나중에 설정으로 노출하면 이 상수도 같이 지운다.
+_STRATEGY_RSI_SELL_ABOVE = 75.0
+
 # exe(PyInstaller)로 빌드해도 기준 폴더가 임시폴더로 튀지 않도록 공용 모듈에서 가져온다.
 from app_paths import BASE_DIR
 ENV_PATH = BASE_DIR / ".env"
@@ -146,8 +151,16 @@ class Settings:
         default_factory=lambda: _get_bool("USE_STRONG_TREND_ENTRY", True)
     )
     # 이 값보다 RSI 가 높으면(과열) 강한 추세여도 사지 않는다.
+    #
+    # 실거래 데이터에서 기본값 85 가 문제를 일으켰다: 과매수 매도 기준
+    # (rsi_sell_above, 기본 75) 보다 높아서 RSI 76~80 구간에서도 매수가
+    # 나갔고, 몇 분 뒤 바로 'RSI 과매수' 매도에 걸려 같은 종목을 하루에
+    # 6~14번씩 사고파는 손실 반복이 나타났다(예: PROM RSI 80.3 매수 →
+    # 2분 뒤 78.1 매도, 3연속 손실). strategy.py 에서 이 값이 매도 기준을
+    # 절대 넘지 못하게 강제하지만(구조적 안전장치), 기본값 자체도 매도
+    # 기준(75)보다 확실히 낮게 잡아 사자마자 되파는 일이 없게 한다.
     strong_entry_rsi_max: float = field(
-        default_factory=lambda: _get_float("STRONG_ENTRY_RSI_MAX", 85.0)
+        default_factory=lambda: _get_float("STRONG_ENTRY_RSI_MAX", 65.0)
     )
     # 눌림목 매수 판정 시 RSI 가 한 봉 만에 이보다 크게 뛰었으면(스파이크)
     # 반등이 아니라 급등 꼭대기일 가능성이 높다고 보고 사지 않는다.
@@ -247,7 +260,15 @@ class Settings:
         if not (0 < self.pullback_rsi_below < 100):
             problems.append("PULLBACK_RSI_BELOW 는 0과 100 사이여야 합니다 (55 권장).")
         if not (0 < self.strong_entry_rsi_max <= 100):
-            problems.append("STRONG_ENTRY_RSI_MAX 는 0보다 크고 100 이하여야 합니다 (85 권장).")
+            problems.append("STRONG_ENTRY_RSI_MAX 는 0보다 크고 100 이하여야 합니다 (65 권장).")
+        elif self.strong_entry_rsi_max > _STRATEGY_RSI_SELL_ABOVE - 5:
+            problems.append(
+                "STRONG_ENTRY_RSI_MAX(%.0f) 가 과매수 매도 기준(%.0f, 현재는 설정 불가로 "
+                "고정값)에 너무 가깝습니다. 사자마자 곧바로 과매수 매도에 걸려 손실이 "
+                "반복될 수 있습니다(실거래에서 실제로 발생함). 매도 기준보다 최소 5 이상 "
+                "낮게 두세요."
+                % (self.strong_entry_rsi_max, _STRATEGY_RSI_SELL_ABOVE)
+            )
         if self.pullback_max_rsi_jump <= 0:
             problems.append("PULLBACK_MAX_RSI_JUMP 는 0보다 커야 합니다 (20 권장).")
         if self.risk_check_interval_sec < 0:

@@ -195,14 +195,18 @@ class SettingsDialog(tk.Toplevel):
 
         bool_field("USE_STRONG_TREND_ENTRY",
                    "상승장 대응 매수 사용 (RSI 높아도 추세면 매수)", "true")
-        text_field("STRONG_ENTRY_RSI_MAX", "이 RSI 넘으면 과열로 보고 매수 안 함", "85", width=10)
+        text_field("STRONG_ENTRY_RSI_MAX", "이 RSI 넘으면 과열로 보고 매수 안 함", "65", width=10)
         ttk.Label(
             scroll_frame, foreground="#555", wraplength=560, justify="left",
             text="강하게 오르는 코인은 RSI 가 오래 60 이상에 머뭅니다. 골든크로스/\n"
                  "눌림목만 쓰면 이럴 때 매수 기회가 거의 사라집니다(\"다 오르는데\n"
                  "하나도 못 산다\"). 이 옵션은 RSI 가 높아도 상승 이동평균의\n"
-                 "간격이 계속 벌어지는 중(추세가 강해지는 중)이면 매수합니다.\n"
-                 "과열 방지선(기본 85) 위에서는 이 경로도 매수하지 않습니다.",
+                 "간격이 계속 벌어지는 중(추세가 강해지는 중)이면 매수합니다.\n\n"
+                 "실거래에서 이 값을 85로 뒀다가 문제가 생겼습니다: 과매수 매도\n"
+                 "기준(75)보다 높아서 RSI 76~80 구간에도 샀고, 몇 분 뒤 곧바로\n"
+                 "'과매수' 로 되팔리는 손실이 하루 6~14회 반복됐습니다. 이제\n"
+                 "이 값이 과매수 매도 기준을 넘지 못하게 항상 강제되지만, 기본값도\n"
+                 "매도 기준(75)보다 충분히 낮은 65로 낮췄습니다.",
         ).pack(anchor="w", pady=(2, 6))
 
         text_field("PULLBACK_MAX_RSI_JUMP",

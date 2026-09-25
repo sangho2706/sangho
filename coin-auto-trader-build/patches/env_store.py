@@ -28,7 +28,7 @@ FIELDS: list[tuple[str, str, str]] = [
     ("PULLBACK_RSI_BELOW", "55", "눌림목 기준 RSI (50=신중 55=권장 60=적극)"),
     ("RISK_CHECK_INTERVAL_SEC", "20", "손절/트레일링을 이 초 간격으로 빠르게 확인 (0=끔)"),
     ("USE_STRONG_TREND_ENTRY", "true", "강한 상승 추세면 RSI 높아도 매수 (상승장 대응)"),
-    ("STRONG_ENTRY_RSI_MAX", "85", "이 RSI 를 넘으면 추세가 강해도 매수 안 함 (과열 방지)"),
+    ("STRONG_ENTRY_RSI_MAX", "65", "이 RSI 를 넘으면 추세가 강해도 매수 안 함 (과매수 매도선보다 충분히 낮게)"),
     ("PULLBACK_MAX_RSI_JUMP", "20", "눌림목 판정 시 RSI가 한 봉에 이보다 뛰면 스파이크로 보고 매수 안 함"),
     ("STOP_LOSS_PCT", "0.05", "손절 기준 (0.05 = 진입가 대비 -5%%에서 자름)"),
     ("TRAIL_START_PCT", "0.05", "이익이 이만큼 난 뒤부터 트레일링 스톱 작동"),
